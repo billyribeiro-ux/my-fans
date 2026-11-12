@@ -1,0 +1,100 @@
+# Project security invariants, evaluated against the unexpanded template.
+let buckets = Resources.*[ Type == 'AWS::S3::Bucket' ]
+let keys = Resources.*[ Type == 'AWS::KMS::Key' ]
+let roles = Resources.*[ Type == 'AWS::IAM::Role' ]
+let bucket_policies = Resources.*[ Type == 'AWS::S3::BucketPolicy' ]
+
+rule private_buckets when %buckets !empty {
+  %buckets.Properties.PublicAccessBlockConfiguration {
+    BlockPublicAcls == true
+    BlockPublicPolicy == true
+    IgnorePublicAcls == true
+    RestrictPublicBuckets == true
+  }
+  %buckets.Properties.OwnershipControls.Rules[*].ObjectOwnership == 'BucketOwnerEnforced'
+  %buckets.Properties.WebsiteConfiguration !exists
+  %buckets.Properties.AccessControl !exists
+}
+rule retained_encrypted_versions when %buckets !empty {
+  %buckets {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.VersioningConfiguration.Status == 'Enabled'
+    Properties.BucketEncryption.ServerSideEncryptionConfiguration[*].ServerSideEncryptionByDefault.SSEAlgorithm IN ['AES256', 'aws:kms']
+  }
+}
+rule rotating_retained_keys when %keys !empty {
+  %keys {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.EnableKeyRotation == true
+    Properties.PendingWindowInDays == 30
+  }
+}
+rule scoped_service_trust when %roles !empty {
+  %roles.Properties.AssumeRolePolicyDocument.Statement[*] {
+    Effect == 'Allow'
+    Action == 'sts:AssumeRole'
+    Principal.Service IN ['s3.amazonaws.com', 'ecs-tasks.amazonaws.com']
+    Condition.StringEquals.'aws:SourceAccount'.Ref == 'AWS::AccountId'
+    Condition.ArnEquals.'aws:SourceArn' exists OR
+    Condition.ArnLike.'aws:SourceArn' exists
+  }
+}
+rule primary_and_recovery_encryption {
+  Resources.MediaBucket.Properties.BucketEncryption.ServerSideEncryptionConfiguration[0].ServerSideEncryptionByDefault.SSEAlgorithm == 'aws:kms'
+  Resources.RecoveryBucket.Properties.BucketEncryption.ServerSideEncryptionConfiguration[0].ServerSideEncryptionByDefault.SSEAlgorithm == 'aws:kms'
+  Resources.MediaBucket.Properties.BucketEncryption.ServerSideEncryptionConfiguration[0].BucketKeyEnabled == false
+  Resources.RecoveryBucket.Properties.BucketEncryption.ServerSideEncryptionConfiguration[0].BucketKeyEnabled == false
+}
+rule preserved_replicas {
+  Resources.MediaBucket.Properties.ReplicationConfiguration.Rules[*] {
+    Status == 'Enabled'
+    DeleteMarkerReplication.Status == 'Disabled'
+    Destination.Metrics.Status == 'Enabled'
+    SourceSelectionCriteria.SseKmsEncryptedObjects.Status == 'Enabled'
+  }
+  Resources.RecoveryBucket.Properties.LifecycleConfiguration !exists
+}
+rule audit_integrity {
+  Resources.MediaAuditTrail.DeletionPolicy == 'Retain'
+  Resources.MediaAuditTrail.UpdateReplacePolicy == 'Retain'
+  Resources.MediaAuditTrail.Properties {
+    IsLogging == true
+    EnableLogFileValidation == true
+  }
+  Resources.MediaBucket.Properties.LoggingConfiguration exists
+  Resources.RecoveryBucket.Properties.LoggingConfiguration exists
+}
+rule tls_only {
+  %bucket_policies.DeletionPolicy == 'Retain'
+  %bucket_policies.UpdateReplacePolicy == 'Retain'
+  Resources.MediaBucketPolicy.Properties.PolicyDocument.Statement[0] {
+    Effect == 'Deny'
+    Principal == '*'
+    Action == 's3:*'
+    Condition.Bool.'aws:SecureTransport' == 'false'
+  }
+  Resources.RecoveryBucketPolicy.Properties.PolicyDocument.Statement[0] {
+    Effect == 'Deny'
+    Principal == '*'
+    Action == 's3:*'
+    Condition.Bool.'aws:SecureTransport' == 'false'
+  }
+  Resources.AuditBucketPolicy.Properties.PolicyDocument.Statement[0] {
+    Effect == 'Deny'
+    Principal == '*'
+    Action == 's3:*'
+    Condition.Bool.'aws:SecureTransport' == 'false'
+  }
+}
+rule workload_primary_objects_only {
+  Resources.MediaTaskRole.Properties.Policies[0].PolicyDocument.Statement[1] {
+    Action == ['s3:GetObject', 's3:PutObject', 's3:DeleteObject']
+    Resource.'Fn::Sub' == '${MediaBucket.Arn}/${MediaPrefix}/*'
+  }
+  Resources.MediaTaskRole.Properties.Policies[0].PolicyDocument.Statement[2] {
+    Action == ['kms:Decrypt', 'kms:GenerateDataKey']
+    Resource.'Fn::GetAtt' == ['MediaKey', 'Arn']
+  }
+}

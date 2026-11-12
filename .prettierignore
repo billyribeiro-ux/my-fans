@@ -1,0 +1,12 @@
+pnpm-lock.yaml
+Cargo.lock
+target
+node_modules
+.pnpm-store
+.svelte-kit
+apps/web/build
+.local
+.claude
+.codex
+.agents
+.aws

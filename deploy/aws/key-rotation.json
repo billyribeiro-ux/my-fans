@@ -1,0 +1,201 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated key rotation with AWS-generated secret material and narrowly scoped owner-task execution.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "arch": "Three staged stacks: foundation, runtime with service counts initially zero, private edge. Account us-east-1 required.",
+      "must": [
+        "Migrate and verify before increasing service counts.",
+        "Preserve all encryption keys and secrets with data."
+      ],
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Deployment and recovery contracts."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String"
+    },
+    "DataKeyArn": {
+      "Type": "String"
+    },
+    "ImageRepositoryArn": {
+      "Type": "String"
+    },
+    "RestoreName": {
+      "Type": "String",
+      "AllowedPattern": "^rotation-[a-f0-9]{8}$"
+    },
+    "CurrentKeyArn": {
+      "Type": "String"
+    },
+    "OwnerSecretArn": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "RecoveryLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Recovery evidence without secret values; distinct from live service logs."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/${RestoreName}"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "RecoveryExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "A temporary execution role can inject only explicitly selected restore secrets; no live role is broadened."
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "IsolatedRestoreStartup",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                  "Resource": [
+                    {
+                      "Ref": "ImageRepositoryArn"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": {
+                    "Fn::GetAtt": ["RecoveryLogs", "Arn"]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": [
+                    {
+                      "Ref": "CurrentKeyArn"
+                    },
+                    {
+                      "Ref": "OwnerSecretArn"
+                    },
+                    {
+                      "Ref": "NextKey"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "NextKey": {
+      "Type": "AWS::SecretsManager::Secret",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Generate replacement key without exposing it to operator tools or text logs.",
+          "must": ["Retain old and new secrets until all dependent database snapshots are expired."]
+        }
+      },
+      "Properties": {
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        },
+        "GenerateSecretString": {
+          "PasswordLength": 64,
+          "ExcludePunctuation": true,
+          "IncludeSpace": false,
+          "ExcludeCharacters": "ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+          "RequireEachIncludedType": false
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "ExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["RecoveryExecutionRole", "Arn"]
+      },
+      "Description": "Execution role for isolated recovery task revisions."
+    },
+    "LogGroup": {
+      "Value": {
+        "Ref": "RecoveryLogs"
+      },
+      "Description": "Restore task log destination."
+    },
+    "NextKeyArn": {
+      "Value": {
+        "Ref": "NextKey"
+      },
+      "Description": "New key reference; no plaintext returned."
+    }
+  }
+}

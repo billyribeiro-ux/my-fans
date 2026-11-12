@@ -1,0 +1,83 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Optional GitHub protected-environment OIDC release role: push only to two existing immutable ECR repositories. The account GitHub OIDC provider must already exist.",
+  "Metadata": { "AWSToolsMetrics": { "AWSAgentToolkit": "aws-cloudformation@3" } },
+  "Parameters": {
+    "GitHubOwner": { "Type": "String", "AllowedPattern": "^[A-Za-z0-9][A-Za-z0-9-]{0,38}$" },
+    "GitHubRepository": { "Type": "String", "AllowedPattern": "^[A-Za-z0-9_.-]{1,100}$" },
+    "GitHubEnvironment": {
+      "Type": "String",
+      "Default": "release",
+      "AllowedPattern": "^[A-Za-z0-9_-]{1,100}$"
+    },
+    "ApplicationRepositoryName": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z0-9][a-z0-9/_-]{1,254}$"
+    },
+    "ScannerRepositoryName": { "Type": "String", "AllowedPattern": "^[a-z0-9][a-z0-9/_-]{1,254}$" }
+  },
+  "Resources": {
+    "GitHubReleaseRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "MaxSessionDuration": 3600,
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": "sts:AssumeRoleWithWebIdentity",
+              "Principal": {
+                "Federated": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:oidc-provider/token.actions.githubusercontent.com"
+                }
+              },
+              "Condition": {
+                "StringEquals": {
+                  "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+                  "token.actions.githubusercontent.com:sub": {
+                    "Fn::Sub": "repo:${GitHubOwner}/${GitHubRepository}:environment:${GitHubEnvironment}"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "PublishReviewedReleaseImages",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                { "Effect": "Allow", "Action": "ecr:GetAuthorizationToken", "Resource": "*" },
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ecr:BatchCheckLayerAvailability",
+                    "ecr:InitiateLayerUpload",
+                    "ecr:UploadLayerPart",
+                    "ecr:CompleteLayerUpload",
+                    "ecr:PutImage",
+                    "ecr:BatchGetImage",
+                    "ecr:DescribeImages",
+                    "ecr:GetDownloadUrlForLayer",
+                    "ecr:DescribeRepositories"
+                  ],
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ApplicationRepositoryName}"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ScannerRepositoryName}"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": { "ReleaseRoleArn": { "Value": { "Fn::GetAtt": ["GitHubReleaseRole", "Arn"] } } }
+}

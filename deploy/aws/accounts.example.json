@@ -1,0 +1,21 @@
+{
+  "accountId": "123456789012",
+  "region": "us-east-1",
+  "deploymentName": "myfans-prod",
+  "hostedZoneId": "Z_REPLACE_WITH_YOUR_PUBLIC_ZONE",
+  "domainName": "fans.example.com",
+  "originDomainName": "origin-fans.example.com",
+  "alarmEmail": "operations@example.com",
+  "dbInstanceClass": "db.r8g.large",
+  "imageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/myfans@sha256:REPLACE_WITH_TESTED_IMAGE_DIGEST",
+  "scannerImageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/myfans-scanner@sha256:REPLACE_WITH_SCANNED_IMAGE_DIGEST",
+  "providerSecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myfans/providers-REPLACE",
+  "policySecretArn": "arn:aws:secretsmanager:us-east-1:123456789012:secret:myfans/operator-policy-REPLACE",
+  "stripeAccountCountry": "US",
+  "sumsubClientId": "REPLACE_WITH_CLIENT_ID",
+  "sumsubLevel": "REPLACE_WITH_APPROVED_LEVEL",
+  "mailFrom": "MyFans <accounts@example.com>",
+  "mediaPrefix": "myfans",
+  "webDesiredCount": 2,
+  "workerDesiredCount": 2
+}

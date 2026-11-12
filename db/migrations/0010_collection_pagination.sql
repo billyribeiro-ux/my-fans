@@ -1,0 +1,15 @@
+CREATE INDEX posts_studio_page ON posts(creator_id,created_at DESC,id DESC);
+CREATE INDEX media_studio_page ON media_assets(creator_id,created_at DESC,id DESC);
+CREATE INDEX media_review_page ON media_assets(created_at,id) WHERE state='quarantine';
+CREATE INDEX creators_review_page ON creators(created_at,id) WHERE verification_status='pending';
+CREATE INDEX notifications_page ON notifications(user_id,created_at DESC,id DESC);
+CREATE INDEX mail_page ON email_deliveries(user_id,created_at DESC,id DESC);
+CREATE INDEX subscriptions_page ON subscriptions(user_id,created_at DESC,id DESC);
+CREATE INDEX payouts_owner_page ON payouts(user_id,created_at DESC,id DESC);
+CREATE INDEX payouts_review_page ON payouts(created_at,id) WHERE status='pending';
+CREATE INDEX reports_review_page ON reports(created_at,id) WHERE status='pending';
+CREATE INDEX checkouts_review_page ON checkouts(paid_at DESC,id DESC) WHERE status IN ('paid','refunded');
+CREATE INDEX users_operations_page ON app_users(created_at DESC,id DESC) WHERE role<>'admin';
+CREATE INDEX jobs_operations_page ON jobs(created_at DESC,id DESC) WHERE status IN ('failed','pending','running');
+CREATE INDEX blocks_owner_page ON user_blocks(user_id,created_at DESC,blocked_user_id DESC);
+CREATE INDEX appeals_review_page ON moderation_appeals(created_at,id) WHERE status='pending';

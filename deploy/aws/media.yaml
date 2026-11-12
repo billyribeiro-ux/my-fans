@@ -1,0 +1,424 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Private creator media with KMS encryption, retained version replicas, scoped ECS workload access, and audited object activity.
+Metadata:
+  AWSToolsMetrics:
+    AWSAgentToolkit: aws-cloudformation@3
+  com.aws.cloudformation.Context:
+    arch: Separate media, recovery, and audit buckets; no public access or compute deployment.
+    must:
+      - Preserve both media keys and all retained buckets through replacement and recovery.
+      - Replicas are asynchronous and do not constitute a coordinated database backup.
+    ref:
+      - at: docs/aws-media.md
+        has: Deployment, permission rationale, cost boundaries, and acceptance procedure.
+Parameters:
+  DeploymentName:
+    Type: String
+    AllowedPattern: '^[a-z][a-z0-9-]{2,19}$'
+    Description: Unique lowercase environment name within this AWS account and region.
+  MediaPrefix:
+    Type: String
+    Default: myfans
+    AllowedPattern: '^[a-z0-9][a-z0-9/-]{0,63}[a-z0-9]$'
+    Description: Application S3_PREFIX without leading or trailing slash; do not change after data exists.
+  AlertTopicArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^$|^arn:aws[a-z-]*:sns:[a-z0-9-]+:[0-9]{12}:[A-Za-z0-9_-]+$'
+    Description: Existing approved SNS topic for replication failures; supply and drill before launch.
+Conditions:
+  HasAlertTopic: !Not [!Equals [!Ref AlertTopicArn, '']]
+Resources:
+  MediaKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Independent encryption boundary for primary objects; IAM delegates only specific workload operations.
+        must: [Retain the key while any current or historical object uses it.]
+    Properties:
+      Description: !Sub '${DeploymentName} primary media'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountIamAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+  RecoveryKey:
+    Type: AWS::KMS::Key
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: The application role cannot decrypt recovery objects or alter their encryption key.
+        must: [Do not destroy this key while retained recovery versions exist.]
+    Properties:
+      Description: !Sub '${DeploymentName} recovery media'
+      EnableKeyRotation: true
+      PendingWindowInDays: 30
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: EnableAccountIamAdministration
+            Effect: Allow
+            Principal: { AWS: !Sub 'arn:${AWS::Partition}:iam::${AWS::AccountId}:root' }
+            Action: 'kms:*'
+            Resource: '*'
+  AuditBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Separate access logs and CloudTrail digests from application-readable media.
+        must: [No application access, No recursive server access logging into this bucket.]
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${AWS::Region}-${DeploymentName}-audit'
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 }
+      LifecycleConfiguration:
+        Rules:
+          - Id: IncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+  RecoveryBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Retained version replicas protect against application deletion; the workload has no permissions here.
+        must:
+          [
+            Keep versioning enabled,
+            No automatic version expiration before an approved retention design.,
+          ]
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${AWS::Region}-${DeploymentName}-recovery'
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt RecoveryKey.Arn
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AuditBucket
+        LogFilePrefix: access/recovery/
+  ReplicationRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: A dedicated S3 role copies only this environment's media prefix and cannot propagate deletion.
+        must: [Keep source account and exact source bucket trust conditions.]
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: s3.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+              ArnEquals:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:s3:::${AWS::AccountId}-${AWS::Region}-${DeploymentName}-media'
+      Policies:
+        - PolicyName: ReplicateEnvironmentMedia
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [s3:GetReplicationConfiguration, s3:ListBucket]
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AWS::AccountId}-${AWS::Region}-${DeploymentName}-media'
+              - Effect: Allow
+                Action:
+                  [
+                    s3:GetObjectVersionForReplication,
+                    s3:GetObjectVersionAcl,
+                    s3:GetObjectVersionTagging,
+                  ]
+                Resource: !Sub 'arn:${AWS::Partition}:s3:::${AWS::AccountId}-${AWS::Region}-${DeploymentName}-media/${MediaPrefix}/*'
+              - Effect: Allow
+                Action: [s3:ReplicateObject, s3:ReplicateTags]
+                Resource: !Sub '${RecoveryBucket.Arn}/${MediaPrefix}/*'
+              - Effect: Allow
+                Action: kms:Decrypt
+                Resource: !GetAtt MediaKey.Arn
+                Condition:
+                  StringEquals: { 'kms:ViaService': !Sub 's3.${AWS::Region}.${AWS::URLSuffix}' }
+                  StringLike:
+                    'kms:EncryptionContext:aws:s3:arn': !Sub 'arn:${AWS::Partition}:s3:::${AWS::AccountId}-${AWS::Region}-${DeploymentName}-media/${MediaPrefix}/*'
+              - Effect: Allow
+                Action: kms:Encrypt
+                Resource: !GetAtt RecoveryKey.Arn
+                Condition:
+                  StringEquals: { 'kms:ViaService': !Sub 's3.${AWS::Region}.${AWS::URLSuffix}' }
+                  StringLike:
+                    'kms:EncryptionContext:aws:s3:arn': !Sub '${RecoveryBucket.Arn}/${MediaPrefix}/*'
+  MediaBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Private origin with versioned encrypted replicas; application authorization mediates every read.
+        must:
+          [No public ACL or policy, Preserve bucket identity while database media references exist.]
+    Properties:
+      BucketName: !Sub '${AWS::AccountId}-${AWS::Region}-${DeploymentName}-media'
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration: { Status: Enabled }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - BucketKeyEnabled: false
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !GetAtt MediaKey.Arn
+      LoggingConfiguration:
+        DestinationBucketName: !Ref AuditBucket
+        LogFilePrefix: access/media/
+      LifecycleConfiguration:
+        Rules:
+          - Id: IncompleteUploads
+            Status: Enabled
+            AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 }
+      ReplicationConfiguration:
+        Role: !GetAtt ReplicationRole.Arn
+        Rules:
+          - Id: RetainedMedia
+            Priority: 1
+            Status: Enabled
+            Filter: { Prefix: !Sub '${MediaPrefix}/' }
+            DeleteMarkerReplication: { Status: Disabled }
+            SourceSelectionCriteria:
+              SseKmsEncryptedObjects: { Status: Enabled }
+            Destination:
+              Bucket: !GetAtt RecoveryBucket.Arn
+              EncryptionConfiguration: { ReplicaKmsKeyID: !GetAtt RecoveryKey.Arn }
+              Metrics: { Status: Enabled }
+  MediaBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Refuse plaintext transport and writes encrypted with any key other than this environment's primary key.
+        must: [Require the application to supply the exact KMS key ARN on every upload.]
+    Properties:
+      Bucket: !Ref MediaBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: TlsOnly
+            Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt MediaBucket.Arn, !Sub '${MediaBucket.Arn}/*']
+            Condition: { Bool: { 'aws:SecureTransport': 'false' } }
+          - Sid: RequireKms
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${MediaBucket.Arn}/*'
+            Condition: { StringNotEquals: { 's3:x-amz-server-side-encryption': 'aws:kms' } }
+          - Sid: RequireEnvironmentKey
+            Effect: Deny
+            Principal: '*'
+            Action: s3:PutObject
+            Resource: !Sub '${MediaBucket.Arn}/*'
+            Condition:
+              StringNotEquals:
+                { 's3:x-amz-server-side-encryption-aws-kms-key-id': !GetAtt MediaKey.Arn }
+  RecoveryBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: All restore and replica access must use encrypted transport.
+        must: [Never grant the application permission to delete recovery versions.]
+    Properties:
+      Bucket: !Ref RecoveryBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt RecoveryBucket.Arn, !Sub '${RecoveryBucket.Arn}/*']
+            Condition: { Bool: { 'aws:SecureTransport': 'false' } }
+  AuditBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Accept logs only from the two owned buckets and the exact regional trail; refuse plaintext transport.
+        must: [Preserve source resource and account conditions on service delivery.]
+    Properties:
+      Bucket: !Ref AuditBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Deny
+            Principal: '*'
+            Action: 's3:*'
+            Resource: [!GetAtt AuditBucket.Arn, !Sub '${AuditBucket.Arn}/*']
+            Condition: { Bool: { 'aws:SecureTransport': 'false' } }
+          - Effect: Allow
+            Principal: { Service: logging.s3.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub '${AuditBucket.Arn}/access/*'
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+              ArnEquals: { 'aws:SourceArn': [!GetAtt MediaBucket.Arn, !GetAtt RecoveryBucket.Arn] }
+          - Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:GetBucketAcl
+            Resource: !GetAtt AuditBucket.Arn
+            Condition:
+              StringEquals:
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${DeploymentName}-media-audit'
+          - Effect: Allow
+            Principal: { Service: cloudtrail.amazonaws.com }
+            Action: s3:PutObject
+            Resource: !Sub '${AuditBucket.Arn}/trail/AWSLogs/${AWS::AccountId}/*'
+            Condition:
+              StringEquals:
+                's3:x-amz-acl': bucket-owner-full-control
+                'aws:SourceArn': !Sub 'arn:${AWS::Partition}:cloudtrail:${AWS::Region}:${AWS::AccountId}:trail/${DeploymentName}-media-audit'
+  MediaAuditTrail:
+    Type: AWS::CloudTrail::Trail
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    DependsOn: AuditBucketPolicy
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Data-event evidence and integrity digests supplement best-effort S3 access logs.
+        must: [Exclude audit-bucket data events to prevent recursive logging.]
+    Properties:
+      TrailName: !Sub '${DeploymentName}-media-audit'
+      S3BucketName: !Ref AuditBucket
+      S3KeyPrefix: trail
+      IsLogging: true
+      IsMultiRegionTrail: false
+      IncludeGlobalServiceEvents: false
+      EnableLogFileValidation: true
+      EventSelectors:
+        - IncludeManagementEvents: true
+          ReadWriteType: All
+          DataResources:
+            - Type: AWS::S3::Object
+              Values:
+                [
+                  !Sub '${MediaBucket.Arn}/${MediaPrefix}/',
+                  !Sub '${RecoveryBucket.Arn}/${MediaPrefix}/',
+                ]
+  MediaTaskRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Workload credentials replace static S3 keys; only primary media operations are granted.
+        must:
+          - Do not grant access to recovery objects, audit logs, historical versions, or bucket administration.
+          - ECS SourceArn uses an account-and-region wildcard because task-role trust cannot scope to a specific cluster.
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ecs-tasks.amazonaws.com }
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals: { 'aws:SourceAccount': !Ref 'AWS::AccountId' }
+              ArnLike:
+                {
+                  'aws:SourceArn': !Sub 'arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*',
+                }
+      Policies:
+        - PolicyName: CurrentPrimaryMedia
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: s3:ListBucket
+                Resource: !GetAtt MediaBucket.Arn
+              - Effect: Allow
+                Action: [s3:GetObject, s3:PutObject, s3:DeleteObject]
+                Resource: !Sub '${MediaBucket.Arn}/${MediaPrefix}/*'
+              - Effect: Allow
+                Action: [kms:Decrypt, kms:GenerateDataKey]
+                Resource: !GetAtt MediaKey.Arn
+                Condition:
+                  StringEquals: { 'kms:ViaService': !Sub 's3.${AWS::Region}.${AWS::URLSuffix}' }
+                  StringLike:
+                    {
+                      'kms:EncryptionContext:aws:s3:arn': !Sub '${MediaBucket.Arn}/${MediaPrefix}/*',
+                    }
+  ReplicationFailureAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Metadata:
+      com.aws.cloudformation.Context:
+        why: Make failed replicas visible; an operator-owned destination must be connected and drilled before launch.
+        must: [Do not treat missing metrics as evidence that replication was tested.]
+    Properties:
+      AlarmDescription: !Sub '${DeploymentName}: investigate failed media replicas before relying on recovery copies'
+      Namespace: AWS/S3
+      MetricName: OperationsFailedReplication
+      Dimensions:
+        - { Name: SourceBucket, Value: !Ref MediaBucket }
+        - { Name: DestinationBucket, Value: !Ref RecoveryBucket }
+        - { Name: RuleId, Value: RetainedMedia }
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: notBreaching
+      AlarmActions: !If [HasAlertTopic, [!Ref AlertTopicArn], []]
+Outputs:
+  MediaBucketName: { Description: S3_BUCKET, Value: !Ref MediaBucket }
+  MediaBucketOwner: { Description: S3_EXPECTED_BUCKET_OWNER, Value: !Ref 'AWS::AccountId' }
+  MediaRegion: { Description: AWS_REGION, Value: !Ref 'AWS::Region' }
+  MediaObjectPrefix: { Description: S3_PREFIX, Value: !Sub '${MediaPrefix}/' }
+  MediaEncryptionKeyArn: { Description: S3_KMS_KEY_ID, Value: !GetAtt MediaKey.Arn }
+  WorkloadRoleArn:
+    {
+      Description: ECS task role; separate from the execution role,
+      Value: !GetAtt MediaTaskRole.Arn,
+    }
+  RecoveryBucketName:
+    {
+      Description: Isolated recovery destination; never configure as the live bucket,
+      Value: !Ref RecoveryBucket,
+    }
+  RecoveryEncryptionKeyArn:
+    {
+      Description: Preserve this key with retained recovery versions,
+      Value: !GetAtt RecoveryKey.Arn,
+    }
+  AuditBucketName: { Description: Restricted log and digest destination, Value: !Ref AuditBucket }

@@ -1,0 +1,1617 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Private two-AZ Fargate network, PostgreSQL HA with retained encrypted backups, generated secrets, and authenticated SES feedback.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "arch": "Three staged stacks: foundation, runtime with service counts initially zero, private edge. Account us-east-1 required.",
+      "must": [
+        "Migrate and verify before increasing service counts.",
+        "Preserve all encryption keys and secrets with data."
+      ],
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Deployment and recovery contracts."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z][a-z0-9-]{2,19}$"
+    },
+    "DbInstanceClass": {
+      "Type": "String",
+      "Default": "db.r8g.large",
+      "AllowedPattern": "^db\\.[a-z0-9]+\\.[a-z0-9]+$"
+    },
+    "CloudFrontPrefixListId": {
+      "Type": "String",
+      "AllowedPattern": "^pl-[a-f0-9]+$"
+    },
+    "AlarmEmail": {
+      "Type": "String",
+      "AllowedPattern": "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$",
+      "Description": "Operator mailbox; confirm the SNS subscription before launch."
+    },
+    "AvailabilityZones": {
+      "Type": "List<AWS::EC2::AvailabilityZone::Name>"
+    }
+  },
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Dedicated isolated address space; application and database have no public IPs."
+        }
+      },
+      "Properties": {
+        "CidrBlock": "10.64.0.0/16",
+        "EnableDnsSupport": true,
+        "EnableDnsHostnames": true,
+        "Tags": [
+          {
+            "Key": "Name",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ]
+      }
+    },
+    "InternetGateway": {
+      "Type": "AWS::EC2::InternetGateway",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "NAT egress for provider HTTPS, authenticated SMTP and signature updates."
+        }
+      },
+      "Properties": {}
+    },
+    "GatewayAttachment": {
+      "Type": "AWS::EC2::VPCGatewayAttachment",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "CloudFront VPC origins require an internet gateway but use private origins."
+        }
+      },
+      "Properties": {
+        "InternetGatewayId": {
+          "Ref": "InternetGateway"
+        },
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PublicSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.0.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "PublicRoutes1": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PublicAssociation1": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PublicSubnet1"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRoutes1"
+        }
+      }
+    },
+    "PrivateSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.16.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "PrivateRoutes1": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PrivateAssociation1": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PrivateSubnet1"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRoutes1"
+        }
+      }
+    },
+    "DatabaseSubnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            0,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.32.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "DatabaseRoutes1": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "DatabaseAssociation1": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "DatabaseSubnet1"
+        },
+        "RouteTableId": {
+          "Ref": "DatabaseRoutes1"
+        }
+      }
+    },
+    "NatAddress1": {
+      "Type": "AWS::EC2::EIP",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Dedicated AZ-local NAT egress address."
+        }
+      },
+      "Properties": {
+        "Domain": "vpc"
+      }
+    },
+    "Nat1": {
+      "Type": "AWS::EC2::NatGateway",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Avoid a single-AZ egress dependency."
+        }
+      },
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": ["NatAddress1", "AllocationId"]
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet1"
+        }
+      },
+      "DependsOn": "GatewayAttachment"
+    },
+    "PublicDefault1": {
+      "Type": "AWS::EC2::Route",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Internet route only for NAT subnets."
+        }
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRoutes1"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      },
+      "DependsOn": "GatewayAttachment"
+    },
+    "PrivateDefault1": {
+      "Type": "AWS::EC2::Route",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Application egress uses its own AZ NAT."
+        }
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRoutes1"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "Nat1"
+        }
+      }
+    },
+    "PublicSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.1.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "PublicRoutes2": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PublicAssociation2": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PublicSubnet2"
+        },
+        "RouteTableId": {
+          "Ref": "PublicRoutes2"
+        }
+      }
+    },
+    "PrivateSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.17.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "PrivateRoutes2": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "PrivateAssociation2": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "PrivateSubnet2"
+        },
+        "RouteTableId": {
+          "Ref": "PrivateRoutes2"
+        }
+      }
+    },
+    "DatabaseSubnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AZ-separated networking; only NAT gateways occupy public subnets."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "AvailabilityZone": {
+          "Fn::Select": [
+            1,
+            {
+              "Ref": "AvailabilityZones"
+            }
+          ]
+        },
+        "CidrBlock": "10.64.33.0/24",
+        "MapPublicIpOnLaunch": false
+      }
+    },
+    "DatabaseRoutes2": {
+      "Type": "AWS::EC2::RouteTable",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate egress and isolated database routing."
+        }
+      },
+      "Properties": {
+        "VpcId": {
+          "Ref": "Vpc"
+        }
+      }
+    },
+    "DatabaseAssociation2": {
+      "Type": "AWS::EC2::SubnetRouteTableAssociation",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Apply the tier-specific route table."
+        }
+      },
+      "Properties": {
+        "SubnetId": {
+          "Ref": "DatabaseSubnet2"
+        },
+        "RouteTableId": {
+          "Ref": "DatabaseRoutes2"
+        }
+      }
+    },
+    "NatAddress2": {
+      "Type": "AWS::EC2::EIP",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Dedicated AZ-local NAT egress address."
+        }
+      },
+      "Properties": {
+        "Domain": "vpc"
+      }
+    },
+    "Nat2": {
+      "Type": "AWS::EC2::NatGateway",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Avoid a single-AZ egress dependency."
+        }
+      },
+      "Properties": {
+        "AllocationId": {
+          "Fn::GetAtt": ["NatAddress2", "AllocationId"]
+        },
+        "SubnetId": {
+          "Ref": "PublicSubnet2"
+        }
+      },
+      "DependsOn": "GatewayAttachment"
+    },
+    "PublicDefault2": {
+      "Type": "AWS::EC2::Route",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Internet route only for NAT subnets."
+        }
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PublicRoutes2"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "GatewayId": {
+          "Ref": "InternetGateway"
+        }
+      },
+      "DependsOn": "GatewayAttachment"
+    },
+    "PrivateDefault2": {
+      "Type": "AWS::EC2::Route",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Application egress uses its own AZ NAT."
+        }
+      },
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "PrivateRoutes2"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "NatGatewayId": {
+          "Ref": "Nat2"
+        }
+      }
+    },
+    "AlbSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Only CloudFront reaches the private TLS listener."
+        }
+      },
+      "Properties": {
+        "GroupDescription": "Only CloudFront reaches the private TLS listener.",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "127.0.0.1/32",
+            "Description": "Replace implicit allow-all with a non-routable deny-by-default target"
+          }
+        ]
+      }
+    },
+    "AppSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Only ALB reaches Node; internal Rust/scanner ports are not ingress rules."
+        }
+      },
+      "Properties": {
+        "GroupDescription": "Only ALB reaches Node; internal Rust/scanner ports are not ingress rules.",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "127.0.0.1/32",
+            "Description": "Replace implicit allow-all with a non-routable deny-by-default target"
+          }
+        ]
+      }
+    },
+    "DbSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Database accepts only application and migration tasks."
+        }
+      },
+      "Properties": {
+        "GroupDescription": "Database accepts only application and migration tasks.",
+        "VpcId": {
+          "Ref": "Vpc"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "-1",
+            "CidrIp": "127.0.0.1/32",
+            "Description": "Replace implicit allow-all with a non-routable deny-by-default target"
+          }
+        ]
+      }
+    },
+    "CloudFrontIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "CloudFront managed origin-facing prefix only; no public CIDR ingress."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AlbSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "SourcePrefixListId": {
+          "Ref": "CloudFrontPrefixListId"
+        }
+      }
+    },
+    "AlbToAppIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Reference workload security groups rather than broad address ranges."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AppSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 3000,
+        "ToPort": 3000,
+        "SourceSecurityGroupId": {
+          "Ref": "AlbSecurityGroup"
+        }
+      }
+    },
+    "AlbToAppEgress": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Permit only the application dependency port."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AlbSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 3000,
+        "ToPort": 3000,
+        "DestinationSecurityGroupId": {
+          "Ref": "AppSecurityGroup"
+        }
+      }
+    },
+    "AppToDbIngress": {
+      "Type": "AWS::EC2::SecurityGroupIngress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Reference workload security groups rather than broad address ranges."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "DbSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "SourceSecurityGroupId": {
+          "Ref": "AppSecurityGroup"
+        }
+      }
+    },
+    "AppToDbEgress": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Permit only the application dependency port."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AppSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 5432,
+        "ToPort": 5432,
+        "DestinationSecurityGroupId": {
+          "Ref": "DbSecurityGroup"
+        }
+      }
+    },
+    "HttpsEgress": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Provider addresses rotate; NAT egress permits only HTTPS and authenticated STARTTLS SMTP."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AppSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 443,
+        "ToPort": 443,
+        "CidrIp": "0.0.0.0/0"
+      }
+    },
+    "SmtpEgress": {
+      "Type": "AWS::EC2::SecurityGroupEgress",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Provider addresses rotate; NAT egress permits only HTTPS and authenticated STARTTLS SMTP."
+        }
+      },
+      "Properties": {
+        "GroupId": {
+          "Ref": "AppSecurityGroup"
+        },
+        "IpProtocol": "tcp",
+        "FromPort": 587,
+        "ToPort": 587,
+        "CidrIp": "0.0.0.0/0"
+      }
+    },
+    "DataKey": {
+      "Type": "AWS::KMS::Key",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Retained encryption boundary for RDS, credentials, operational logs and alerts.",
+          "must": ["Never delete while any backup or secret version depends on this key."]
+        }
+      },
+      "Properties": {
+        "EnableKeyRotation": true,
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Sid": "AccountAdministration",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+            },
+            {
+              "Sid": "EncryptedEnvironmentLogs",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": {
+                  "Fn::Sub": "logs.${AWS::Region}.${AWS::URLSuffix}"
+                }
+              },
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/myfans/${DeploymentName}/*"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "EncryptedDatabaseLogs",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": {
+                  "Fn::Sub": "logs.${AWS::Region}.${AWS::URLSuffix}"
+                }
+              },
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:DescribeKey"
+              ],
+              "Resource": "*",
+              "Condition": {
+                "ArnEquals": {
+                  "kms:EncryptionContext:aws:logs:arn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/rds/instance/${DeploymentName}/postgresql"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "SesEncryptedTopic",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ses.amazonaws.com"
+              },
+              "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                }
+              }
+            },
+            {
+              "Sid": "CloudWatchEncryptedAlarmTopic",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudwatch.amazonaws.com"
+              },
+              "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+              "Resource": "*",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "RuntimePassword": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Generated inside AWS; plaintext is never a CloudFormation parameter or output.",
+          "must": [
+            "Retain all key versions; secret changes require a controlled restart and data-aware rotation."
+          ]
+        }
+      },
+      "Properties": {
+        "Description": {
+          "Fn::Sub": "${DeploymentName} RuntimePassword"
+        },
+        "KmsKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        },
+        "GenerateSecretString": {
+          "PasswordLength": 40,
+          "ExcludePunctuation": true,
+          "IncludeSpace": false
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "MfaKey": {
+      "Type": "AWS::SecretsManager::Secret",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Generated inside AWS; plaintext is never a CloudFormation parameter or output.",
+          "must": [
+            "Retain all key versions; secret changes require a controlled restart and data-aware rotation."
+          ]
+        }
+      },
+      "Properties": {
+        "Description": {
+          "Fn::Sub": "${DeploymentName} MfaKey"
+        },
+        "KmsKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        },
+        "GenerateSecretString": {
+          "PasswordLength": 64,
+          "ExcludePunctuation": true,
+          "IncludeSpace": false,
+          "ExcludeCharacters": "ghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ",
+          "RequireEachIncludedType": false
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "DbSubnets": {
+      "Type": "AWS::RDS::DBSubnetGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Database has no NAT or internet routes."
+        }
+      },
+      "Properties": {
+        "DBSubnetGroupDescription": "Isolated two-AZ database subnets",
+        "SubnetIds": [
+          {
+            "Ref": "DatabaseSubnet1"
+          },
+          {
+            "Ref": "DatabaseSubnet2"
+          }
+        ]
+      }
+    },
+    "DbParameters": {
+      "Type": "AWS::RDS::DBParameterGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Require TLS; do not log SQL parameters that may contain private message bodies."
+        }
+      },
+      "Properties": {
+        "Description": "TLS and conservative log privacy for PostgreSQL 18",
+        "Family": "postgres18",
+        "Parameters": {
+          "rds.force_ssl": "1",
+          "password_encryption": "scram-sha-256",
+          "log_statement": "none",
+          "log_min_error_statement": "panic",
+          "log_connections": "1",
+          "log_disconnections": "1"
+        }
+      }
+    },
+    "DbLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Explicit encrypted log group precedes RDS log export."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/aws/rds/instance/${DeploymentName}/postgresql"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "Database": {
+      "Type": "AWS::RDS::DBInstance",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Synchronous standby handles AZ failure; 35-day PITR and retained manual checkpoints handle recovery.",
+          "must": [
+            "No public address; no schema owner credentials in web or worker task.",
+            "Keep current MFA secret and S3 versions with database recovery."
+          ]
+        }
+      },
+      "Properties": {
+        "DBInstanceIdentifier": {
+          "Ref": "DeploymentName"
+        },
+        "Engine": "postgres",
+        "EngineVersion": "18.6",
+        "DBInstanceClass": {
+          "Ref": "DbInstanceClass"
+        },
+        "DBName": "myfans",
+        "MasterUsername": "myfans_owner",
+        "ManageMasterUserPassword": true,
+        "MasterUserSecret": {
+          "KmsKeyId": {
+            "Fn::GetAtt": ["DataKey", "Arn"]
+          }
+        },
+        "AllocatedStorage": "100",
+        "MaxAllocatedStorage": 1000,
+        "StorageType": "gp3",
+        "StorageEncrypted": true,
+        "KmsKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        },
+        "MultiAZ": true,
+        "PubliclyAccessible": false,
+        "DeletionProtection": true,
+        "BackupRetentionPeriod": 35,
+        "DeleteAutomatedBackups": false,
+        "CopyTagsToSnapshot": true,
+        "AutoMinorVersionUpgrade": true,
+        "AllowMajorVersionUpgrade": false,
+        "DBSubnetGroupName": {
+          "Ref": "DbSubnets"
+        },
+        "DBParameterGroupName": {
+          "Ref": "DbParameters"
+        },
+        "VPCSecurityGroups": [
+          {
+            "Ref": "DbSecurityGroup"
+          }
+        ],
+        "EnableCloudwatchLogsExports": ["postgresql"],
+        "EnablePerformanceInsights": true,
+        "PerformanceInsightsRetentionPeriod": 7,
+        "PerformanceInsightsKMSKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        },
+        "PreferredBackupWindow": "05:00-05:30",
+        "PreferredMaintenanceWindow": "sun:06:00-sun:07:00",
+        "CACertificateIdentifier": "rds-ca-rsa2048-g1",
+        "Tags": [
+          {
+            "Key": "Application",
+            "Value": "myfans"
+          },
+          {
+            "Key": "Environment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ]
+      },
+      "DependsOn": "DbLogs",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "AlarmTopic": {
+      "Type": "AWS::SNS::Topic",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Encrypted operator notification channel."
+        }
+      },
+      "Properties": {
+        "KmsMasterKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        }
+      }
+    },
+    "AlarmSubscription": {
+      "Type": "AWS::SNS::Subscription",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Requires operator mailbox confirmation and a delivery drill."
+        }
+      },
+      "Properties": {
+        "TopicArn": {
+          "Ref": "AlarmTopic"
+        },
+        "Protocol": "email",
+        "Endpoint": {
+          "Ref": "AlarmEmail"
+        }
+      }
+    },
+    "AlarmTopicPolicy": {
+      "Type": "AWS::SNS::TopicPolicy",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Only alarms in this account publish operational notifications."
+        }
+      },
+      "Properties": {
+        "Topics": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "cloudwatch.amazonaws.com"
+              },
+              "Action": "sns:Publish",
+              "Resource": {
+                "Ref": "AlarmTopic"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:cloudwatch:${AWS::Region}:${AWS::AccountId}:alarm:*"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "MailEvents": {
+      "Type": "AWS::SNS::Topic",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Dedicated SES bounce and complaint events; recipients are private."
+        }
+      },
+      "Properties": {
+        "KmsMasterKeyId": {
+          "Fn::GetAtt": ["DataKey", "Arn"]
+        }
+      }
+    },
+    "MailConfiguration": {
+      "Type": "AWS::SES::ConfigurationSet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Account SES suppression supplements application-level suppression."
+        }
+      },
+      "Properties": {
+        "Name": {
+          "Fn::Sub": "${DeploymentName}-transactional"
+        },
+        "ReputationOptions": {
+          "ReputationMetricsEnabled": true
+        },
+        "SendingOptions": {
+          "SendingEnabled": true
+        },
+        "SuppressionOptions": {
+          "SuppressedReasons": ["BOUNCE", "COMPLAINT"]
+        }
+      }
+    },
+    "MailEventsPolicy": {
+      "Type": "AWS::SNS::TopicPolicy",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Only the selected SES configuration set may publish feedback."
+        }
+      },
+      "Properties": {
+        "Topics": [
+          {
+            "Ref": "MailEvents"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ses.amazonaws.com"
+              },
+              "Action": "sns:Publish",
+              "Resource": {
+                "Ref": "MailEvents"
+              },
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnEquals": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${MailConfiguration}"
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "MailDeadLetters": {
+      "Type": "AWS::SQS::Queue",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Retain repeatedly failing feedback for operator investigation."
+        }
+      },
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "MailQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Durable IAM-authenticated feedback; only successful application processing deletes a message."
+        }
+      },
+      "Properties": {
+        "SqsManagedSseEnabled": true,
+        "MessageRetentionPeriod": 1209600,
+        "VisibilityTimeout": 120,
+        "ReceiveMessageWaitTimeSeconds": 20,
+        "RedrivePolicy": {
+          "deadLetterTargetArn": {
+            "Fn::GetAtt": ["MailDeadLetters", "Arn"]
+          },
+          "maxReceiveCount": 5
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "MailQueuePolicy": {
+      "Type": "AWS::SQS::QueuePolicy",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "No public webhook or arbitrary publisher can forge delivery feedback."
+        }
+      },
+      "Properties": {
+        "Queues": [
+          {
+            "Ref": "MailQueue"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "sns.amazonaws.com"
+              },
+              "Action": "sqs:SendMessage",
+              "Resource": {
+                "Fn::GetAtt": ["MailQueue", "Arn"]
+              },
+              "Condition": {
+                "ArnEquals": {
+                  "aws:SourceArn": {
+                    "Ref": "MailEvents"
+                  }
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                }
+              }
+            },
+            {
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "sqs:*",
+              "Resource": {
+                "Fn::GetAtt": ["MailQueue", "Arn"]
+              },
+              "Condition": {
+                "Bool": {
+                  "aws:SecureTransport": "false"
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "MailSubscription": {
+      "Type": "AWS::SNS::Subscription",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Application receives the SES JSON document directly."
+        }
+      },
+      "Properties": {
+        "TopicArn": {
+          "Ref": "MailEvents"
+        },
+        "Protocol": "sqs",
+        "Endpoint": {
+          "Fn::GetAtt": ["MailQueue", "Arn"]
+        },
+        "RawMessageDelivery": true
+      },
+      "DependsOn": "MailQueuePolicy"
+    },
+    "MailDestination": {
+      "Type": "AWS::SES::ConfigurationSetEventDestination",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Feedback is opt-in via the SMTP configuration-set header."
+        }
+      },
+      "Properties": {
+        "ConfigurationSetName": {
+          "Ref": "MailConfiguration"
+        },
+        "EventDestination": {
+          "Name": "delivery-feedback",
+          "Enabled": true,
+          "MatchingEventTypes": ["bounce", "complaint"],
+          "SnsDestination": {
+            "TopicARN": {
+              "Ref": "MailEvents"
+            }
+          }
+        }
+      },
+      "DependsOn": "MailEventsPolicy"
+    },
+    "DbStorageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "FreeStorageSpace",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "Database"
+            }
+          }
+        ],
+        "Threshold": 21474836480,
+        "ComparisonOperator": "LessThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Minimum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ]
+      }
+    },
+    "DbMemoryAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "FreeableMemory",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "Database"
+            }
+          }
+        ],
+        "Threshold": 1073741824,
+        "ComparisonOperator": "LessThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Minimum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ]
+      }
+    },
+    "DbCpuAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "CPUUtilization",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "Database"
+            }
+          }
+        ],
+        "Threshold": 80,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Average",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ]
+      }
+    },
+    "MailBacklogAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateAgeOfOldestMessage",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": ["MailQueue", "QueueName"]
+            }
+          }
+        ],
+        "Threshold": 300,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "Statistic": "Maximum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ]
+      }
+    },
+    "MailFailedAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/SQS",
+        "MetricName": "ApproximateNumberOfMessagesVisible",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": ["MailDeadLetters", "QueueName"]
+            }
+          }
+        ],
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "Statistic": "Maximum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopic"
+          }
+        ]
+      }
+    },
+    "RecoverySigningKey": {
+      "Type": "AWS::KMS::Key",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Sign checkpoint manifests without exporting private signing material.",
+          "must": [
+            "Asymmetric KMS keys do not support automatic rotation; retain old public verification keys when rotating."
+          ]
+        }
+      },
+      "Properties": {
+        "KeySpec": "ECC_NIST_P256",
+        "KeyUsage": "SIGN_VERIFY",
+        "PendingWindowInDays": 30,
+        "KeyPolicy": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Sub": "arn:${AWS::Partition}:iam::${AWS::AccountId}:root"
+                }
+              },
+              "Action": "kms:*",
+              "Resource": "*"
+            }
+          ]
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    }
+  },
+  "Outputs": {
+    "VpcId": {
+      "Value": {
+        "Ref": "Vpc"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "PrivateSubnets": {
+      "Value": {
+        "Fn::Join": [
+          ",",
+          [
+            {
+              "Ref": "PrivateSubnet1"
+            },
+            {
+              "Ref": "PrivateSubnet2"
+            }
+          ]
+        ]
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "AppSecurityGroup": {
+      "Value": {
+        "Ref": "AppSecurityGroup"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "AlbSecurityGroup": {
+      "Value": {
+        "Ref": "AlbSecurityGroup"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DatabaseSecurityGroup": {
+      "Value": {
+        "Ref": "DbSecurityGroup"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DatabaseSubnetGroup": {
+      "Value": {
+        "Ref": "DbSubnets"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DatabaseIdentifier": {
+      "Value": {
+        "Ref": "Database"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DatabaseHost": {
+      "Value": {
+        "Fn::GetAtt": ["Database", "Endpoint.Address"]
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DatabaseOwnerSecretArn": {
+      "Value": {
+        "Fn::GetAtt": ["Database", "MasterUserSecret.SecretArn"]
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "RuntimePasswordArn": {
+      "Value": {
+        "Ref": "RuntimePassword"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "MfaKeyArn": {
+      "Value": {
+        "Ref": "MfaKey"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "DataKeyArn": {
+      "Value": {
+        "Fn::GetAtt": ["DataKey", "Arn"]
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "AlarmTopicArn": {
+      "Value": {
+        "Ref": "AlarmTopic"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "MailQueueUrl": {
+      "Value": {
+        "Ref": "MailQueue"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "MailQueueArn": {
+      "Value": {
+        "Fn::GetAtt": ["MailQueue", "Arn"]
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "SesConfigurationSet": {
+      "Value": {
+        "Ref": "MailConfiguration"
+      },
+      "Description": "Input to runtime deployment and recovery tooling; no secret values."
+    },
+    "RecoverySigningKeyArn": {
+      "Value": {
+        "Fn::GetAtt": ["RecoverySigningKey", "Arn"]
+      },
+      "Description": "Trusted checkpoint signing identity; application task has no sign permission."
+    },
+    "DatabaseParameterGroup": {
+      "Value": {
+        "Ref": "DbParameters"
+      },
+      "Description": "TLS-enforcing parameter group for isolated recovery."
+    }
+  }
+}

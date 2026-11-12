@@ -1,0 +1,91 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Retained immutable ECR repositories for tested ARM64 application and scanner artifacts.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Account bootstrap and release publication."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String",
+      "AllowedPattern": "^[a-z][a-z0-9-]{2,19}$"
+    }
+  },
+  "Resources": {
+    "ApplicationRepository": {
+      "Type": "AWS::ECR::Repository",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Digest-based releases retained across stack changes; no automatic cleanup of rollback images.",
+          "must": [
+            "Image tags immutable; scan every push; application workloads have pull-only permissions."
+          ]
+        }
+      },
+      "Properties": {
+        "RepositoryName": {
+          "Fn::Sub": "${DeploymentName}/application"
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true
+        },
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256"
+        },
+        "EmptyOnDelete": false
+      }
+    },
+    "ScannerRepository": {
+      "Type": "AWS::ECR::Repository",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Digest-based releases retained across stack changes; no automatic cleanup of rollback images.",
+          "must": [
+            "Image tags immutable; scan every push; application workloads have pull-only permissions."
+          ]
+        }
+      },
+      "Properties": {
+        "RepositoryName": {
+          "Fn::Sub": "${DeploymentName}/scanner"
+        },
+        "ImageTagMutability": "IMMUTABLE",
+        "ImageScanningConfiguration": {
+          "ScanOnPush": true
+        },
+        "EncryptionConfiguration": {
+          "EncryptionType": "AES256"
+        },
+        "EmptyOnDelete": false
+      }
+    }
+  },
+  "Outputs": {
+    "ApplicationRepositoryUri": {
+      "Value": {
+        "Fn::GetAtt": ["ApplicationRepository", "RepositoryUri"]
+      },
+      "Description": "Publication target; runtime uses immutable digest."
+    },
+    "ScannerRepositoryUri": {
+      "Value": {
+        "Fn::GetAtt": ["ScannerRepository", "RepositoryUri"]
+      },
+      "Description": "Publication target; runtime uses immutable digest."
+    }
+  }
+}

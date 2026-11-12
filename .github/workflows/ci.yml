@@ -1,0 +1,189 @@
+name: Verify
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+defaults:
+  run:
+    shell: bash
+jobs:
+  container:
+    needs: [application, database, dependencies, infrastructure]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - run: npm install --global pnpm@12.10.1
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @myfans/web exec playwright install --with-deps chromium
+      - name: Build and deploy the immutable packaged application
+        run: |
+          docker build --build-arg APP_ORIGIN=http://127.0.0.1:3100 --tag myfans:ci .
+          image_id=$(docker image inspect myfans:ci --format '{{.Id}}')
+          bash scripts/verify-media-isolation.sh "$image_id"
+          node scripts/deploy-private.mjs prepare ci-staging "$image_id" 3100
+          node scripts/deploy-private.mjs up .local/deployments/ci-staging
+          node scripts/deploy-private.mjs seed .local/deployments/ci-staging
+      - name: Verify browser journeys through the restricted runtime login
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:3100
+        run: pnpm test:e2e
+      - name: Rehearse a consistent backup and isolated restore
+        run: |
+          node scripts/deploy-private.mjs stop .local/deployments/ci-staging
+          node scripts/deploy-private.mjs backup .local/deployments/ci-staging
+          backup_directory=$(find .local/deployments/ci-staging/backups -mindepth 1 -maxdepth 1 -type d)
+          node scripts/deploy-private.mjs verify-backup .local/deployments/ci-staging "$backup_directory"
+          node scripts/deploy-private.mjs up .local/deployments/ci-staging
+      - name: Stop staging writers
+        # The package gate must pass before any release manifest is produced.
+        if: always()
+        run: |
+          if test -f .local/deployments/ci-staging/deployment.json; then
+            node scripts/deploy-private.mjs stop .local/deployments/ci-staging
+          fi
+      - name: Inventory and scan the private release package
+        run: |
+          mkdir -p .local/releases
+          image_id=$(docker image inspect myfans:ci --format '{{.Id}}')
+          node scripts/package-private.mjs "$image_id" .local/releases/ci
+  application:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DATABASE_URL: postgresql://myfans:ci-only-disposable@127.0.0.1:5432/myfans
+      TEST_DATABASE_URL: postgresql://myfans:ci-only-disposable@127.0.0.1:5432/myfans
+    services:
+      postgres:
+        image: postgres:18.6@sha256:fc973eb97c9fd04bfa1840e0f510719a584ccb3be8debfe6a4144637a9dfe8cf
+        env:
+          POSTGRES_USER: myfans
+          POSTGRES_PASSWORD: ci-only-disposable
+          POSTGRES_DB: myfans
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U myfans -d myfans"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - name: Install pinned toolchains
+        run: |
+          npm install --global pnpm@12.10.1
+          rustup toolchain install 1.99.0 --profile minimal --component rustfmt --component clippy
+      - run: pnpm install --frozen-lockfile
+      - name: Build pinned decoders and fail-closed Linux launcher
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config nasm libx264-dev
+          bash scripts/install-ffmpeg.sh
+          cargo +1.99.0 build --locked -p myfans-api --bin myfans-media
+          cc -std=c11 -O2 -Wall -Wextra -Werror -static -fstack-protector-strong scripts/media-sandbox.c -o .local/tools/bin/myfans-media-sandbox
+          sudo install -m 0755 .local/tools/bin/ffmpeg .local/tools/bin/ffprobe .local/tools/bin/myfans-media-sandbox target/debug/myfans-media /usr/local/bin/
+          echo "$PWD/.local/tools/bin" >> "$GITHUB_PATH"
+      - name: Verify native Linux filesystem, environment, and socket confinement
+        run: |
+          task_probe=$(mktemp -d "$RUNNER_TEMP/media-isolation.XXXXXX")
+          trap 'rm -rf "$task_probe"' EXIT
+          mkdir -m 700 "$task_probe/work"
+          printf filesystem-canary > "$task_probe/canary"
+          DATABASE_URL=nonsecret-environment-canary AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/nonsecret-metadata-canary /usr/local/bin/myfans-media-sandbox "$task_probe/work" /usr/local/bin/myfans-media self-test "$task_probe/canary"
+          test "$(cat "$task_probe/canary")" = filesystem-canary
+          if /usr/local/bin/myfans-media-sandbox "$task_probe/work" /bin/sh -c true; then
+            echo 'Unexpected executable escaped the launcher allowlist.' >&2
+            exit 1
+          fi
+          chmod 755 "$task_probe/work"
+          if /usr/local/bin/myfans-media-sandbox "$task_probe/work" /usr/local/bin/ffprobe -version; then
+            echo 'Launcher accepted an unsafe workspace.' >&2
+            exit 1
+          fi
+      - run: pnpm check
+      - run: pnpm format:check
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: pnpm test
+      - run: pnpm test:api
+      - run: pnpm test:integration
+      - run: pnpm db:seed
+      - run: pnpm build
+      - run: pnpm --filter @myfans/web exec playwright install --with-deps chromium
+      - run: pnpm test:e2e
+  database:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18.6@sha256:fc973eb97c9fd04bfa1840e0f510719a584ccb3be8debfe6a4144637a9dfe8cf
+        env:
+          POSTGRES_USER: myfans
+          POSTGRES_PASSWORD: ci-only-disposable
+          POSTGRES_DB: myfans_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U myfans -d myfans_test"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Verify migration and invariants
+        env:
+          TEST_DATABASE_URL: postgresql://myfans:ci-only-disposable@127.0.0.1:5432/myfans_test
+        run: bash scripts/test-db.sh
+  dependencies:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - name: Install pinned audit toolchains
+        run: |
+          npm install --global pnpm@12.10.1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo install cargo-audit --version 0.22.2 --locked
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm audit
+      - run: cargo audit
+      - run: cargo audit --file deploy/aws/scanner.Cargo.lock
+  infrastructure:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install isolated, pinned infrastructure validators
+        run: |
+          python3 -m venv .local/cfn-tools
+          .local/cfn-tools/bin/pip install --require-hashes -r deploy/aws/requirements.lock
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo install cfn-guard --version 3.2.0 --locked --root .local/cfn-tools
+      - name: Validate schema, policy, and negative controls without cloud credentials
+        run: |
+          .local/cfn-tools/bin/python scripts/verify-infrastructure.py
+          .local/cfn-tools/bin/python scripts/verify-cloud-infrastructure.py
+          node --test scripts/cloud-entrypoint.test.mjs scripts/cloud-operations.test.mjs

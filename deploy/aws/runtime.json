@@ -1,0 +1,2832 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Private non-root ECS Managed Instances web and worker services, isolated schema-owner administration capacity, and HTTPS ALB. Services start at zero until migration succeeds.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "arch": "Three staged stacks: foundation, runtime with service counts initially zero, private edge. Account us-east-1 required.",
+      "must": [
+        "Migrate and verify before increasing service counts.",
+        "Preserve all encryption keys and secrets with data."
+      ],
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Deployment and recovery contracts."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String"
+    },
+    "VpcId": {
+      "Type": "String"
+    },
+    "AppSecurityGroup": {
+      "Type": "String"
+    },
+    "AlbSecurityGroup": {
+      "Type": "String"
+    },
+    "DatabaseHost": {
+      "Type": "String"
+    },
+    "DatabaseOwnerSecretArn": {
+      "Type": "String"
+    },
+    "RuntimePasswordArn": {
+      "Type": "String"
+    },
+    "MfaKeyArn": {
+      "Type": "String"
+    },
+    "DataKeyArn": {
+      "Type": "String"
+    },
+    "AlarmTopicArn": {
+      "Type": "String"
+    },
+    "MailQueueUrl": {
+      "Type": "String"
+    },
+    "MailQueueArn": {
+      "Type": "String"
+    },
+    "SesConfigurationSet": {
+      "Type": "String"
+    },
+    "MediaBucketName": {
+      "Type": "String"
+    },
+    "MediaEncryptionKeyArn": {
+      "Type": "String"
+    },
+    "MediaTaskRoleArn": {
+      "Type": "String"
+    },
+    "MediaTaskRoleName": {
+      "Type": "String"
+    },
+    "ProviderSecretArn": {
+      "Type": "String"
+    },
+    "ProviderSecretKmsKeyArn": {
+      "Type": "String"
+    },
+    "PolicySecretArn": {
+      "Type": "String"
+    },
+    "PolicySecretKmsKeyArn": {
+      "Type": "String"
+    },
+    "HostedZoneId": {
+      "Type": "String"
+    },
+    "DomainName": {
+      "Type": "String"
+    },
+    "OriginDomainName": {
+      "Type": "String"
+    },
+    "StripeAccountCountry": {
+      "Type": "String"
+    },
+    "SumsubClientId": {
+      "Type": "String"
+    },
+    "SumsubLevel": {
+      "Type": "String"
+    },
+    "MailFrom": {
+      "Type": "String"
+    },
+    "PrivateSubnets": {
+      "Type": "List<AWS::EC2::Subnet::Id>"
+    },
+    "ImageUri": {
+      "Type": "String",
+      "AllowedPattern": "^[0-9]{12}\\.dkr\\.ecr\\.us-east-1\\.amazonaws\\.com/[a-z0-9][a-z0-9/_-]*@sha256:[a-f0-9]{64}$",
+      "Description": "Scanned ARM64 application image digest built for https://DomainName."
+    },
+    "ScannerImageUri": {
+      "Type": "String",
+      "AllowedPattern": "^[0-9]{12}\\.dkr\\.ecr\\.us-east-1\\.amazonaws\\.com/[a-z0-9][a-z0-9/_-]*@sha256:[a-f0-9]{64}$",
+      "Description": "Scanned ARM64 scanner image from deploy/aws/scanner.Dockerfile."
+    },
+    "MediaPrefix": {
+      "Type": "String",
+      "Default": "myfans",
+      "AllowedPattern": "^[a-z0-9][a-z0-9/-]{0,63}[a-z0-9]$"
+    },
+    "WebDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 20
+    },
+    "WorkerDesiredCount": {
+      "Type": "Number",
+      "Default": 0,
+      "MinValue": 0,
+      "MaxValue": 10
+    },
+    "EbsKeyArn": {
+      "Type": "String",
+      "Description": "Enabled regional default EBS encryption key resolved by preflight. Regional EBS encryption must be enabled."
+    },
+    "MfaKeyVersion": {
+      "Type": "String",
+      "Default": "",
+      "AllowedPattern": "^$|^[a-zA-Z0-9-]{32,64}$"
+    },
+    "DatabaseIdentifier": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "WebLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Retained encrypted operational evidence without secrets or request bodies."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/weblogs"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "WorkerLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Retained encrypted operational evidence without secrets or request bodies."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/workerlogs"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "MigrationLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Retained encrypted operational evidence without secrets or request bodies."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/migrationlogs"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "Cluster": {
+      "Type": "AWS::ECS::Cluster",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AWS-managed current-kernel compute with distinct web, worker and administration capacity pools; enhanced metrics."
+        }
+      },
+      "Properties": {
+        "ClusterSettings": [
+          {
+            "Name": "containerInsights",
+            "Value": "enhanced"
+          }
+        ]
+      }
+    },
+    "RuntimeExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Execution role can inject only its task secrets; application task cannot fetch secrets.",
+          "must": ["Migration owner secret must never appear in runtime execution role."]
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "TaskStartup",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                  "Resource": [
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/"
+                          },
+                          {
+                            "Fn::Select": [
+                              0,
+                              {
+                                "Fn::Split": [
+                                  "@",
+                                  {
+                                    "Fn::Select": [
+                                      1,
+                                      {
+                                        "Fn::Split": [
+                                          ".amazonaws.com/",
+                                          {
+                                            "Ref": "ImageUri"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/"
+                          },
+                          {
+                            "Fn::Select": [
+                              0,
+                              {
+                                "Fn::Split": [
+                                  "@",
+                                  {
+                                    "Fn::Select": [
+                                      1,
+                                      {
+                                        "Fn::Split": [
+                                          ".amazonaws.com/",
+                                          {
+                                            "Ref": "ScannerImageUri"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": ["WebLogs", "Arn"]
+                    },
+                    {
+                      "Fn::GetAtt": ["WorkerLogs", "Arn"]
+                    },
+                    {
+                      "Fn::GetAtt": ["MigrationLogs", "Arn"]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": [
+                    {
+                      "Ref": "RuntimePasswordArn"
+                    },
+                    {
+                      "Ref": "MfaKeyArn"
+                    },
+                    {
+                      "Ref": "ProviderSecretArn"
+                    },
+                    {
+                      "Ref": "PolicySecretArn"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": [
+                    {
+                      "Ref": "DataKeyArn"
+                    },
+                    {
+                      "Ref": "ProviderSecretKmsKeyArn"
+                    },
+                    {
+                      "Ref": "PolicySecretKmsKeyArn"
+                    }
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "MigrationExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Execution role can inject only its task secrets; application task cannot fetch secrets.",
+          "must": ["Migration owner secret must never appear in runtime execution role."]
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "TaskStartup",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                  "Resource": [
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/"
+                          },
+                          {
+                            "Fn::Select": [
+                              0,
+                              {
+                                "Fn::Split": [
+                                  "@",
+                                  {
+                                    "Fn::Select": [
+                                      1,
+                                      {
+                                        "Fn::Split": [
+                                          ".amazonaws.com/",
+                                          {
+                                            "Ref": "ImageUri"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    },
+                    {
+                      "Fn::Join": [
+                        "",
+                        [
+                          {
+                            "Fn::Sub": "arn:${AWS::Partition}:ecr:${AWS::Region}:${AWS::AccountId}:repository/"
+                          },
+                          {
+                            "Fn::Select": [
+                              0,
+                              {
+                                "Fn::Split": [
+                                  "@",
+                                  {
+                                    "Fn::Select": [
+                                      1,
+                                      {
+                                        "Fn::Split": [
+                                          ".amazonaws.com/",
+                                          {
+                                            "Ref": "ScannerImageUri"
+                                          }
+                                        ]
+                                      }
+                                    ]
+                                  }
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": [
+                    {
+                      "Fn::GetAtt": ["WebLogs", "Arn"]
+                    },
+                    {
+                      "Fn::GetAtt": ["WorkerLogs", "Arn"]
+                    },
+                    {
+                      "Fn::GetAtt": ["MigrationLogs", "Arn"]
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": [
+                    {
+                      "Ref": "DatabaseOwnerSecretArn"
+                    },
+                    {
+                      "Ref": "RuntimePasswordArn"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": [
+                    {
+                      "Ref": "DataKeyArn"
+                    }
+                  ],
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "FeedbackPolicy": {
+      "Type": "AWS::IAM::Policy",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Only the selected SES queue is consumable using the workload role."
+        }
+      },
+      "Properties": {
+        "PolicyName": "ConsumeAuthenticatedMailFeedback",
+        "Roles": [
+          {
+            "Ref": "MediaTaskRoleName"
+          }
+        ],
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Action": [
+                "sqs:ReceiveMessage",
+                "sqs:DeleteMessage",
+                "sqs:ChangeMessageVisibility",
+                "sqs:GetQueueAttributes"
+              ],
+              "Resource": {
+                "Ref": "MailQueueArn"
+              }
+            }
+          ]
+        }
+      }
+    },
+    "OriginCertificate": {
+      "Type": "AWS::CertificateManager::Certificate",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Publicly trusted certificate protects CloudFront to private ALB traffic."
+        }
+      },
+      "Properties": {
+        "DomainName": {
+          "Ref": "OriginDomainName"
+        },
+        "ValidationMethod": "DNS",
+        "DomainValidationOptions": [
+          {
+            "DomainName": {
+              "Ref": "OriginDomainName"
+            },
+            "HostedZoneId": {
+              "Ref": "HostedZoneId"
+            }
+          }
+        ]
+      }
+    },
+    "LoadBalancer": {
+      "Type": "AWS::ElasticLoadBalancingV2::LoadBalancer",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Private origin reachable only through CloudFront; Rust port is never routed."
+        }
+      },
+      "Properties": {
+        "Scheme": "internal",
+        "Type": "application",
+        "Subnets": {
+          "Ref": "PrivateSubnets"
+        },
+        "SecurityGroups": [
+          {
+            "Ref": "AlbSecurityGroup"
+          }
+        ],
+        "LoadBalancerAttributes": [
+          {
+            "Key": "deletion_protection.enabled",
+            "Value": "true"
+          },
+          {
+            "Key": "routing.http.drop_invalid_header_fields.enabled",
+            "Value": "true"
+          },
+          {
+            "Key": "routing.http.desync_mitigation_mode",
+            "Value": "strictest"
+          },
+          {
+            "Key": "idle_timeout.timeout_seconds",
+            "Value": "60"
+          }
+        ]
+      }
+    },
+    "OriginDns": {
+      "Type": "AWS::Route53::RecordSet",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Public DNS resolves private ALB addresses; matching hostname supports origin TLS."
+        }
+      },
+      "Properties": {
+        "HostedZoneId": {
+          "Ref": "HostedZoneId"
+        },
+        "Name": {
+          "Ref": "OriginDomainName"
+        },
+        "Type": "A",
+        "AliasTarget": {
+          "DNSName": {
+            "Fn::GetAtt": ["LoadBalancer", "DNSName"]
+          },
+          "HostedZoneId": {
+            "Fn::GetAtt": ["LoadBalancer", "CanonicalHostedZoneID"]
+          },
+          "EvaluateTargetHealth": false
+        }
+      }
+    },
+    "TargetGroup": {
+      "Type": "AWS::ElasticLoadBalancingV2::TargetGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Readiness includes container dual-listener check and ALB auth-page availability."
+        }
+      },
+      "Properties": {
+        "Port": 3000,
+        "Protocol": "HTTP",
+        "TargetType": "ip",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "HealthCheckPath": "/auth",
+        "HealthCheckProtocol": "HTTP",
+        "HealthCheckIntervalSeconds": 20,
+        "HealthCheckTimeoutSeconds": 5,
+        "HealthyThresholdCount": 2,
+        "UnhealthyThresholdCount": 3,
+        "Matcher": {
+          "HttpCode": "200"
+        },
+        "TargetGroupAttributes": [
+          {
+            "Key": "deregistration_delay.timeout_seconds",
+            "Value": "120"
+          }
+        ]
+      }
+    },
+    "Listener": {
+      "Type": "AWS::ElasticLoadBalancingV2::Listener",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "TLS is mandatory for the only ingress listener."
+        }
+      },
+      "Properties": {
+        "LoadBalancerArn": {
+          "Ref": "LoadBalancer"
+        },
+        "Port": 443,
+        "Protocol": "HTTPS",
+        "SslPolicy": "ELBSecurityPolicy-TLS13-1-2-2021-06",
+        "Certificates": [
+          {
+            "CertificateArn": {
+              "Ref": "OriginCertificate"
+            }
+          }
+        ],
+        "DefaultActions": [
+          {
+            "Type": "forward",
+            "TargetGroupArn": {
+              "Ref": "TargetGroup"
+            }
+          }
+        ]
+      }
+    },
+    "WebTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate secret/CPU/process boundaries for web, background media and schema administration.",
+          "must": [
+            "Non-root application; drop all capabilities; bounded stop and memory; immutable image."
+          ]
+        }
+      },
+      "Properties": {
+        "Family": {
+          "Fn::Sub": "${DeploymentName}-web"
+        },
+        "RequiresCompatibilities": ["MANAGED_INSTANCES"],
+        "NetworkMode": "awsvpc",
+        "Cpu": "1024",
+        "Memory": "2048",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": ["RuntimeExecutionRole", "Arn"]
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "ARM64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "Volumes": [
+          {
+            "Name": "runtime"
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "prepare",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "0",
+            "Essential": false,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["prepare"],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"],
+                "Add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+              }
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "WebLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            }
+          },
+          {
+            "Name": "app",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "1000:1000",
+            "Essential": true,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["web"],
+            "Environment": [
+              {
+                "Name": "APP_MODE",
+                "Value": "production"
+              },
+              {
+                "Name": "APP_RUN_MIGRATIONS",
+                "Value": "false"
+              },
+              {
+                "Name": "APP_EMBEDDED_WORKER",
+                "Value": "false"
+              },
+              {
+                "Name": "PUBLIC_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "APP_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "MAIL_PUBLIC_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "HOST",
+                "Value": "0.0.0.0"
+              },
+              {
+                "Name": "PORT",
+                "Value": "3000"
+              },
+              {
+                "Name": "API_BASE_URL",
+                "Value": "http://127.0.0.1:8080"
+              },
+              {
+                "Name": "MEDIA_STORAGE",
+                "Value": "s3"
+              },
+              {
+                "Name": "MEDIA_ROOT",
+                "Value": "/run/myfans/media"
+              },
+              {
+                "Name": "MEDIA_SCANNER",
+                "Value": "clamav"
+              },
+              {
+                "Name": "CLAMAV_ADDRESS",
+                "Value": "127.0.0.1:3310"
+              },
+              {
+                "Name": "AWS_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "S3_BUCKET",
+                "Value": {
+                  "Ref": "MediaBucketName"
+                }
+              },
+              {
+                "Name": "S3_EXPECTED_BUCKET_OWNER",
+                "Value": {
+                  "Ref": "AWS::AccountId"
+                }
+              },
+              {
+                "Name": "S3_PREFIX",
+                "Value": {
+                  "Fn::Sub": "${MediaPrefix}/"
+                }
+              },
+              {
+                "Name": "S3_KMS_KEY_ID",
+                "Value": {
+                  "Ref": "MediaEncryptionKeyArn"
+                }
+              },
+              {
+                "Name": "PAYMENT_PROVIDER",
+                "Value": "stripe"
+              },
+              {
+                "Name": "IDENTITY_PROVIDER",
+                "Value": "sumsub"
+              },
+              {
+                "Name": "SUMSUB_MODE",
+                "Value": "live"
+              },
+              {
+                "Name": "STRIPE_ACCOUNT_COUNTRY",
+                "Value": {
+                  "Ref": "StripeAccountCountry"
+                }
+              },
+              {
+                "Name": "SUMSUB_CLIENT_ID",
+                "Value": {
+                  "Ref": "SumsubClientId"
+                }
+              },
+              {
+                "Name": "SUMSUB_LEVEL",
+                "Value": {
+                  "Ref": "SumsubLevel"
+                }
+              },
+              {
+                "Name": "MAIL_TRANSPORT",
+                "Value": "smtp"
+              },
+              {
+                "Name": "SMTP_HOST",
+                "Value": {
+                  "Fn::Sub": "email-smtp.${AWS::Region}.amazonaws.com"
+                }
+              },
+              {
+                "Name": "SMTP_PORT",
+                "Value": "587"
+              },
+              {
+                "Name": "SMTP_SECURITY",
+                "Value": "starttls"
+              },
+              {
+                "Name": "MAIL_FROM",
+                "Value": {
+                  "Ref": "MailFrom"
+                }
+              },
+              {
+                "Name": "SES_CONFIGURATION_SET",
+                "Value": {
+                  "Ref": "SesConfigurationSet"
+                }
+              },
+              {
+                "Name": "MAIL_FEEDBACK_QUEUE_URL",
+                "Value": {
+                  "Ref": "MailQueueUrl"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_HOST",
+                "Value": {
+                  "Ref": "DatabaseHost"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_NAME",
+                "Value": "myfans"
+              },
+              {
+                "Name": "CLOUD_DATABASE_USERNAME",
+                "Value": "myfans_app"
+              },
+              {
+                "Name": "TMPDIR",
+                "Value": "/run/myfans/tmp"
+              },
+              {
+                "Name": "TZ",
+                "Value": "UTC"
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CLOUD_STRIPE_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:stripe_secret_key::"
+                }
+              },
+              {
+                "Name": "CLOUD_STRIPE_WEBHOOK_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:stripe_webhook_secret::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_TOKEN",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_app_token::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_secret_key::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_WEBHOOK_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_webhook_secret::"
+                }
+              },
+              {
+                "Name": "CLOUD_SMTP_USERNAME",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:smtp_username::"
+                }
+              },
+              {
+                "Name": "CLOUD_SMTP_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:smtp_password::"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Ref": "RuntimePasswordArn"
+                }
+              },
+              {
+                "Name": "CLOUD_MFA_KEY_HEX",
+                "ValueFrom": {
+                  "Fn::If": [
+                    "PinnedMfaVersion",
+                    {
+                      "Fn::Sub": "${MfaKeyArn}:::${MfaKeyVersion}"
+                    },
+                    {
+                      "Ref": "MfaKeyArn"
+                    }
+                  ]
+                }
+              },
+              {
+                "Name": "CLOUD_OPERATOR_POLICY",
+                "ValueFrom": {
+                  "Ref": "PolicySecretArn"
+                }
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"]
+              },
+              "InitProcessEnabled": true
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "prepare",
+                "Condition": "SUCCESS"
+              }
+            ],
+            "StopTimeout": 120,
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "WebLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            },
+            "PortMappings": [
+              {
+                "ContainerPort": 3000,
+                "Protocol": "tcp"
+              }
+            ],
+            "HealthCheck": {
+              "Command": ["CMD", "node", "/app/scripts/healthcheck.mjs"],
+              "Interval": 20,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 60
+            }
+          }
+        ],
+        "TaskRoleArn": {
+          "Ref": "MediaTaskRoleArn"
+        }
+      }
+    },
+    "WebService": {
+      "Type": "AWS::ECS::Service",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Start at zero for first migration; subsequent rollout replaces tasks with health-gated rollback."
+        }
+      },
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "WebTask"
+        },
+        "DesiredCount": {
+          "Ref": "WebDesiredCount"
+        },
+        "EnableExecuteCommand": false,
+        "AvailabilityZoneRebalancing": "ENABLED",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "AppSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          }
+        },
+        "PropagateTags": "TASK_DEFINITION",
+        "EnableECSManagedTags": true,
+        "LoadBalancers": [
+          {
+            "ContainerName": "app",
+            "ContainerPort": 3000,
+            "TargetGroupArn": {
+              "Ref": "TargetGroup"
+            }
+          }
+        ],
+        "HealthCheckGracePeriodSeconds": 90,
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": {
+              "Ref": "WebCompute"
+            },
+            "Weight": 1
+          }
+        ],
+        "PlacementConstraints": [
+          {
+            "Type": "distinctInstance"
+          }
+        ]
+      },
+      "DependsOn": ["Listener"]
+    },
+    "WorkerTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate secret/CPU/process boundaries for web, background media and schema administration.",
+          "must": [
+            "Non-root application; drop all capabilities; bounded stop and memory; immutable image.",
+            "Retain exact task revisions while signed recovery checkpoints depend on their launch contracts."
+          ]
+        }
+      },
+      "Properties": {
+        "Family": {
+          "Fn::Sub": "${DeploymentName}-worker"
+        },
+        "RequiresCompatibilities": ["MANAGED_INSTANCES"],
+        "NetworkMode": "awsvpc",
+        "Cpu": "2048",
+        "Memory": "8192",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": ["RuntimeExecutionRole", "Arn"]
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "ARM64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "Volumes": [
+          {
+            "Name": "runtime"
+          },
+          {
+            "Name": "scanner"
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "prepare",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "0",
+            "Essential": false,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["prepare"],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              },
+              {
+                "SourceVolume": "scanner",
+                "ContainerPath": "/scan"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"],
+                "Add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+              }
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "WorkerLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            }
+          },
+          {
+            "Name": "app",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "1000:1000",
+            "Essential": true,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["worker"],
+            "Environment": [
+              {
+                "Name": "APP_MODE",
+                "Value": "production"
+              },
+              {
+                "Name": "APP_RUN_MIGRATIONS",
+                "Value": "false"
+              },
+              {
+                "Name": "APP_EMBEDDED_WORKER",
+                "Value": "false"
+              },
+              {
+                "Name": "PUBLIC_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "APP_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "MAIL_PUBLIC_ORIGIN",
+                "Value": {
+                  "Fn::Sub": "https://${DomainName}"
+                }
+              },
+              {
+                "Name": "HOST",
+                "Value": "0.0.0.0"
+              },
+              {
+                "Name": "PORT",
+                "Value": "3000"
+              },
+              {
+                "Name": "API_BASE_URL",
+                "Value": "http://127.0.0.1:8080"
+              },
+              {
+                "Name": "MEDIA_STORAGE",
+                "Value": "s3"
+              },
+              {
+                "Name": "MEDIA_ROOT",
+                "Value": "/run/myfans/media"
+              },
+              {
+                "Name": "MEDIA_SCANNER",
+                "Value": "clamav"
+              },
+              {
+                "Name": "CLAMAV_ADDRESS",
+                "Value": "127.0.0.1:3310"
+              },
+              {
+                "Name": "AWS_REGION",
+                "Value": {
+                  "Ref": "AWS::Region"
+                }
+              },
+              {
+                "Name": "S3_BUCKET",
+                "Value": {
+                  "Ref": "MediaBucketName"
+                }
+              },
+              {
+                "Name": "S3_EXPECTED_BUCKET_OWNER",
+                "Value": {
+                  "Ref": "AWS::AccountId"
+                }
+              },
+              {
+                "Name": "S3_PREFIX",
+                "Value": {
+                  "Fn::Sub": "${MediaPrefix}/"
+                }
+              },
+              {
+                "Name": "S3_KMS_KEY_ID",
+                "Value": {
+                  "Ref": "MediaEncryptionKeyArn"
+                }
+              },
+              {
+                "Name": "PAYMENT_PROVIDER",
+                "Value": "stripe"
+              },
+              {
+                "Name": "IDENTITY_PROVIDER",
+                "Value": "sumsub"
+              },
+              {
+                "Name": "SUMSUB_MODE",
+                "Value": "live"
+              },
+              {
+                "Name": "STRIPE_ACCOUNT_COUNTRY",
+                "Value": {
+                  "Ref": "StripeAccountCountry"
+                }
+              },
+              {
+                "Name": "SUMSUB_CLIENT_ID",
+                "Value": {
+                  "Ref": "SumsubClientId"
+                }
+              },
+              {
+                "Name": "SUMSUB_LEVEL",
+                "Value": {
+                  "Ref": "SumsubLevel"
+                }
+              },
+              {
+                "Name": "MAIL_TRANSPORT",
+                "Value": "smtp"
+              },
+              {
+                "Name": "SMTP_HOST",
+                "Value": {
+                  "Fn::Sub": "email-smtp.${AWS::Region}.amazonaws.com"
+                }
+              },
+              {
+                "Name": "SMTP_PORT",
+                "Value": "587"
+              },
+              {
+                "Name": "SMTP_SECURITY",
+                "Value": "starttls"
+              },
+              {
+                "Name": "MAIL_FROM",
+                "Value": {
+                  "Ref": "MailFrom"
+                }
+              },
+              {
+                "Name": "SES_CONFIGURATION_SET",
+                "Value": {
+                  "Ref": "SesConfigurationSet"
+                }
+              },
+              {
+                "Name": "MAIL_FEEDBACK_QUEUE_URL",
+                "Value": {
+                  "Ref": "MailQueueUrl"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_HOST",
+                "Value": {
+                  "Ref": "DatabaseHost"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_NAME",
+                "Value": "myfans"
+              },
+              {
+                "Name": "CLOUD_DATABASE_USERNAME",
+                "Value": "myfans_app"
+              },
+              {
+                "Name": "TMPDIR",
+                "Value": "/run/myfans/tmp"
+              },
+              {
+                "Name": "TZ",
+                "Value": "UTC"
+              },
+              {
+                "Name": "APP_DEPLOYMENT",
+                "Value": {
+                  "Ref": "DeploymentName"
+                }
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CLOUD_STRIPE_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:stripe_secret_key::"
+                }
+              },
+              {
+                "Name": "CLOUD_STRIPE_WEBHOOK_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:stripe_webhook_secret::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_TOKEN",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_app_token::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_secret_key::"
+                }
+              },
+              {
+                "Name": "CLOUD_SUMSUB_WEBHOOK_SECRET",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:sumsub_webhook_secret::"
+                }
+              },
+              {
+                "Name": "CLOUD_SMTP_USERNAME",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:smtp_username::"
+                }
+              },
+              {
+                "Name": "CLOUD_SMTP_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${ProviderSecretArn}:smtp_password::"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Ref": "RuntimePasswordArn"
+                }
+              },
+              {
+                "Name": "CLOUD_MFA_KEY_HEX",
+                "ValueFrom": {
+                  "Fn::If": [
+                    "PinnedMfaVersion",
+                    {
+                      "Fn::Sub": "${MfaKeyArn}:::${MfaKeyVersion}"
+                    },
+                    {
+                      "Ref": "MfaKeyArn"
+                    }
+                  ]
+                }
+              },
+              {
+                "Name": "CLOUD_OPERATOR_POLICY",
+                "ValueFrom": {
+                  "Ref": "PolicySecretArn"
+                }
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"]
+              },
+              "InitProcessEnabled": true
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "prepare",
+                "Condition": "SUCCESS"
+              },
+              {
+                "ContainerName": "scanner",
+                "Condition": "HEALTHY"
+              }
+            ],
+            "StopTimeout": 120,
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "WorkerLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            },
+            "HealthCheck": {
+              "Command": ["CMD", "node", "/app/scripts/cloud-worker-health.mjs"],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 60
+            }
+          },
+          {
+            "Name": "scanner",
+            "Image": {
+              "Ref": "ScannerImageUri"
+            },
+            "User": "1000:1000",
+            "Essential": true,
+            "ReadonlyRootFilesystem": true,
+            "Environment": [
+              {
+                "Name": "TZ",
+                "Value": "UTC"
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "scanner",
+                "ContainerPath": "/scan"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"]
+              },
+              "InitProcessEnabled": true
+            },
+            "MemoryReservation": 4096,
+            "Memory": 5120,
+            "HealthCheck": {
+              "Command": ["CMD", "/usr/local/bin/scanner-health"],
+              "Interval": 30,
+              "Timeout": 5,
+              "Retries": 3,
+              "StartPeriod": 300
+            },
+            "StopTimeout": 30,
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "WorkerLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "prepare",
+                "Condition": "SUCCESS"
+              }
+            ]
+          }
+        ],
+        "TaskRoleArn": {
+          "Ref": "MediaTaskRoleArn"
+        }
+      }
+    },
+    "WorkerService": {
+      "Type": "AWS::ECS::Service",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Start at zero for first migration; subsequent rollout replaces tasks with health-gated rollback."
+        }
+      },
+      "Properties": {
+        "Cluster": {
+          "Ref": "Cluster"
+        },
+        "TaskDefinition": {
+          "Ref": "WorkerTask"
+        },
+        "DesiredCount": {
+          "Ref": "WorkerDesiredCount"
+        },
+        "EnableExecuteCommand": false,
+        "AvailabilityZoneRebalancing": "ENABLED",
+        "NetworkConfiguration": {
+          "AwsvpcConfiguration": {
+            "AssignPublicIp": "DISABLED",
+            "Subnets": {
+              "Ref": "PrivateSubnets"
+            },
+            "SecurityGroups": [
+              {
+                "Ref": "AppSecurityGroup"
+              }
+            ]
+          }
+        },
+        "DeploymentConfiguration": {
+          "MaximumPercent": 200,
+          "MinimumHealthyPercent": 100,
+          "DeploymentCircuitBreaker": {
+            "Enable": true,
+            "Rollback": true
+          }
+        },
+        "PropagateTags": "TASK_DEFINITION",
+        "EnableECSManagedTags": true,
+        "CapacityProviderStrategy": [
+          {
+            "CapacityProvider": {
+              "Ref": "WorkerCompute"
+            },
+            "Weight": 1
+          }
+        ],
+        "PlacementConstraints": [
+          {
+            "Type": "distinctInstance"
+          }
+        ]
+      },
+      "DependsOn": ["FeedbackPolicy"]
+    },
+    "MigrationTask": {
+      "Type": "AWS::ECS::TaskDefinition",
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Separate secret/CPU/process boundaries for web, background media and schema administration.",
+          "must": [
+            "Non-root application; drop all capabilities; bounded stop and memory; immutable image.",
+            "Retain exact task revisions while signed recovery checkpoints depend on their launch contracts."
+          ]
+        }
+      },
+      "Properties": {
+        "Family": {
+          "Fn::Sub": "${DeploymentName}-migration"
+        },
+        "RequiresCompatibilities": ["MANAGED_INSTANCES"],
+        "NetworkMode": "awsvpc",
+        "Cpu": "512",
+        "Memory": "1024",
+        "ExecutionRoleArn": {
+          "Fn::GetAtt": ["MigrationExecutionRole", "Arn"]
+        },
+        "RuntimePlatform": {
+          "CpuArchitecture": "ARM64",
+          "OperatingSystemFamily": "LINUX"
+        },
+        "Volumes": [
+          {
+            "Name": "runtime"
+          }
+        ],
+        "ContainerDefinitions": [
+          {
+            "Name": "prepare",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "0",
+            "Essential": false,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["prepare"],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"],
+                "Add": ["CHOWN", "FOWNER", "DAC_OVERRIDE"]
+              }
+            },
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "MigrationLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            }
+          },
+          {
+            "Name": "app",
+            "Image": {
+              "Ref": "ImageUri"
+            },
+            "User": "1000:1000",
+            "Essential": true,
+            "ReadonlyRootFilesystem": true,
+            "EntryPoint": ["node", "/app/scripts/cloud-entrypoint.mjs"],
+            "Command": ["migrate"],
+            "Environment": [
+              {
+                "Name": "CLOUD_DATABASE_HOST",
+                "Value": {
+                  "Ref": "DatabaseHost"
+                }
+              },
+              {
+                "Name": "CLOUD_DATABASE_NAME",
+                "Value": "myfans"
+              },
+              {
+                "Name": "CLOUD_DATABASE_USERNAME",
+                "Value": "myfans_owner"
+              },
+              {
+                "Name": "APP_MODE",
+                "Value": "production"
+              },
+              {
+                "Name": "APP_RUN_MIGRATIONS",
+                "Value": "true"
+              }
+            ],
+            "Secrets": [
+              {
+                "Name": "CLOUD_DATABASE_PASSWORD",
+                "ValueFrom": {
+                  "Fn::Sub": "${DatabaseOwnerSecretArn}:password::"
+                }
+              },
+              {
+                "Name": "CLOUD_RUNTIME_PASSWORD",
+                "ValueFrom": {
+                  "Ref": "RuntimePasswordArn"
+                }
+              }
+            ],
+            "MountPoints": [
+              {
+                "SourceVolume": "runtime",
+                "ContainerPath": "/run/myfans"
+              }
+            ],
+            "LinuxParameters": {
+              "Capabilities": {
+                "Drop": ["ALL"]
+              },
+              "InitProcessEnabled": true
+            },
+            "DependsOn": [
+              {
+                "ContainerName": "prepare",
+                "Condition": "SUCCESS"
+              }
+            ],
+            "StopTimeout": 120,
+            "LogConfiguration": {
+              "LogDriver": "awslogs",
+              "Options": {
+                "awslogs-group": {
+                  "Ref": "MigrationLogs"
+                },
+                "awslogs-region": {
+                  "Ref": "AWS::Region"
+                },
+                "awslogs-stream-prefix": "task",
+                "mode": "blocking"
+              }
+            }
+          }
+        ]
+      }
+    },
+    "Origin5xxAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Page on origin errors, latency or health failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/ApplicationELB",
+        "MetricName": "HTTPCode_Target_5XX_Count",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": {
+              "Fn::GetAtt": ["LoadBalancer", "LoadBalancerFullName"]
+            }
+          },
+          {
+            "Name": "TargetGroup",
+            "Value": {
+              "Fn::GetAtt": ["TargetGroup", "TargetGroupFullName"]
+            }
+          }
+        ],
+        "Statistic": "Sum",
+        "Threshold": 10,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Period": 60,
+        "EvaluationPeriods": 3,
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "OriginLatencyAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Page on origin errors, latency or health failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/ApplicationELB",
+        "MetricName": "TargetResponseTime",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": {
+              "Fn::GetAtt": ["LoadBalancer", "LoadBalancerFullName"]
+            }
+          },
+          {
+            "Name": "TargetGroup",
+            "Value": {
+              "Fn::GetAtt": ["TargetGroup", "TargetGroupFullName"]
+            }
+          }
+        ],
+        "Statistic": "Average",
+        "Threshold": 2,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Period": 60,
+        "EvaluationPeriods": 3,
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "UnhealthyTargetsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Page on origin errors, latency or health failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/ApplicationELB",
+        "MetricName": "UnHealthyHostCount",
+        "Dimensions": [
+          {
+            "Name": "LoadBalancer",
+            "Value": {
+              "Fn::GetAtt": ["LoadBalancer", "LoadBalancerFullName"]
+            }
+          },
+          {
+            "Name": "TargetGroup",
+            "Value": {
+              "Fn::GetAtt": ["TargetGroup", "TargetGroupFullName"]
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Period": 60,
+        "EvaluationPeriods": 3,
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "WorkerErrors": {
+      "Type": "AWS::Logs::MetricFilter",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Worker errors include failed ticks and heartbeat persistence failures without recording private payloads."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Ref": "WorkerLogs"
+        },
+        "FilterPattern": "{ $.level = \"ERROR\" }",
+        "MetricTransformations": [
+          {
+            "MetricNamespace": {
+              "Fn::Sub": "MyFans/${DeploymentName}"
+            },
+            "MetricName": "WorkerErrors",
+            "MetricValue": "1",
+            "DefaultValue": 0
+          }
+        ]
+      }
+    },
+    "WorkerErrorAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Sustained worker failures require operator investigation."
+        }
+      },
+      "Properties": {
+        "Namespace": {
+          "Fn::Sub": "MyFans/${DeploymentName}"
+        },
+        "MetricName": "WorkerErrors",
+        "Statistic": "Sum",
+        "Threshold": 3,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 1,
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "OperationsDashboard": {
+      "Type": "AWS::CloudWatch::Dashboard",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Initial operational view; load acceptance sets capacity and paging thresholds."
+        }
+      },
+      "Properties": {
+        "DashboardName": {
+          "Fn::Sub": "${DeploymentName}-operations"
+        },
+        "DashboardBody": {
+          "Fn::Sub": "{\"widgets\":[{\"type\":\"metric\",\"x\":0,\"y\":0,\"width\":12,\"height\":6,\"properties\":{\"region\":\"us-east-1\",\"title\":\"Origin latency and unhealthy targets\",\"metrics\":[[\"AWS/ApplicationELB\",\"TargetResponseTime\",\"LoadBalancer\",\"${LoadBalancer.LoadBalancerFullName}\",\"TargetGroup\",\"${TargetGroup.TargetGroupFullName}\",{\"stat\":\"p95\"}],[\".\",\"UnHealthyHostCount\",\".\",\".\",\".\",\".\",{\"stat\":\"Maximum\",\"yAxis\":\"right\"}]],\"period\":60}},{\"type\":\"metric\",\"x\":12,\"y\":0,\"width\":12,\"height\":6,\"properties\":{\"region\":\"us-east-1\",\"title\":\"Background processing failures\",\"metrics\":[[\"MyFans/${DeploymentName}\",\"WorkerErrors\",{\"stat\":\"Sum\"}]],\"period\":300}},{\"type\":\"metric\",\"x\":0,\"y\":6,\"width\":24,\"height\":8,\"properties\":{\"region\":\"us-east-1\",\"title\":\"Worker and provider state (aggregate counts; queue age on right axis)\",\"metrics\":[[\"MyFans\",\"FailedJobs\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\"}],[\"MyFans\",\"OpenFinanceIssues\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\"}],[\"MyFans\",\"SMTPBacklog\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\"}],[\"MyFans\",\"ScannerUnavailable\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\"}],[\"MyFans\",\"WorkerAlive\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\"}],[\"MyFans\",\"QueueLagSeconds\",\"Deployment\",\"${DeploymentName}\",{\"stat\":\"Maximum\",\"yAxis\":\"right\"}]],\"period\":60}},{\"type\":\"metric\",\"x\":0,\"y\":14,\"width\":24,\"height\":6,\"properties\":{\"region\":\"us-east-1\",\"title\":\"Active database capacity (recovery-aware)\",\"metrics\":[[\"AWS/RDS\",\"CPUUtilization\",\"DBInstanceIdentifier\",\"${DatabaseIdentifier}\",{\"stat\":\"Average\"}],[\"AWS/RDS\",\"FreeableMemory\",\"DBInstanceIdentifier\",\"${DatabaseIdentifier}\",{\"stat\":\"Minimum\",\"yAxis\":\"right\"}],[\"AWS/RDS\",\"FreeStorageSpace\",\"DBInstanceIdentifier\",\"${DatabaseIdentifier}\",{\"stat\":\"Minimum\",\"yAxis\":\"right\"}]],\"period\":300}}]}"
+        }
+      }
+    },
+    "ManagedHostSecurityGroup": {
+      "Type": "AWS::EC2::SecurityGroup",
+      "Properties": {
+        "GroupDescription": "Managed compute hosts: no ingress; HTTPS control-plane egress only",
+        "VpcId": {
+          "Ref": "VpcId"
+        },
+        "SecurityGroupEgress": [
+          {
+            "IpProtocol": "tcp",
+            "FromPort": 443,
+            "ToPort": 443,
+            "CidrIp": "0.0.0.0/0"
+          }
+        ]
+      }
+    },
+    "ManagedInstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ec2.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole"
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonECSInstanceRolePolicyForManagedInstances"
+          }
+        ]
+      }
+    },
+    "ManagedInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "Properties": {
+        "Roles": [
+          {
+            "Ref": "ManagedInstanceRole"
+          }
+        ]
+      }
+    },
+    "ManagedInfrastructureRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "AWS maintains compute lifecycle permissions; explicit PassRole scope prevents passing other instance roles."
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "ManagedPolicyArns": [
+          {
+            "Fn::Sub": "arn:${AWS::Partition}:iam::aws:policy/AmazonECSInfrastructureRolePolicyForManagedInstances"
+          }
+        ],
+        "Policies": [
+          {
+            "PolicyName": "OnlyThisInstanceRole",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "iam:PassRole",
+                  "Resource": {
+                    "Fn::GetAtt": ["ManagedInstanceRole", "Arn"]
+                  },
+                  "Condition": {
+                    "StringLike": {
+                      "iam:PassedToService": "ec2.*"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Deny",
+                  "Action": "iam:PassRole",
+                  "NotResource": {
+                    "Fn::GetAtt": ["ManagedInstanceRole", "Arn"]
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "EncryptedHostDisks",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "kms:Encrypt",
+                    "kms:Decrypt",
+                    "kms:ReEncrypt*",
+                    "kms:GenerateDataKey*",
+                    "kms:DescribeKey"
+                  ],
+                  "Resource": {
+                    "Ref": "EbsKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "ec2.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["kms:CreateGrant"],
+                  "Resource": {
+                    "Ref": "EbsKeyArn"
+                  },
+                  "Condition": {
+                    "Bool": {
+                      "kms:GrantIsForAWSResource": "true"
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "RefuseUnencryptedHostVolumes",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Deny",
+                  "Action": ["ec2:RunInstances", "ec2:CreateVolume"],
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ec2:${AWS::Region}:${AWS::AccountId}:volume/*"
+                  },
+                  "Condition": {
+                    "Bool": {
+                      "ec2:Encrypted": "false"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "WebCompute": {
+      "Type": "AWS::ECS::CapacityProvider",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "Cluster"
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          },
+          {
+            "Key": "workload",
+            "Value": "WebCompute"
+          }
+        ],
+        "ManagedInstancesProvider": {
+          "InfrastructureRoleArn": {
+            "Fn::GetAtt": ["ManagedInfrastructureRole", "Arn"]
+          },
+          "PropagateTags": "CAPACITY_PROVIDER",
+          "AutoRepairConfiguration": {
+            "ActionsStatus": "ENABLED"
+          },
+          "InfrastructureOptimization": {
+            "ScaleInAfter": 300
+          },
+          "InstanceLaunchTemplate": {
+            "CapacityOptionType": "ON_DEMAND",
+            "Ec2InstanceProfileArn": {
+              "Fn::GetAtt": ["ManagedInstanceProfile", "Arn"]
+            },
+            "Monitoring": "DETAILED",
+            "InstanceMetadataTagsPropagation": false,
+            "NetworkConfiguration": {
+              "Subnets": {
+                "Ref": "PrivateSubnets"
+              },
+              "SecurityGroups": [
+                {
+                  "Ref": "ManagedHostSecurityGroup"
+                }
+              ]
+            },
+            "StorageConfiguration": {
+              "StorageSizeGiB": 100
+            },
+            "LocalStorageConfiguration": {
+              "UseLocalStorage": false
+            },
+            "InstanceRequirements": {
+              "VCpuCount": {
+                "Min": 2,
+                "Max": 8
+              },
+              "MemoryMiB": {
+                "Min": 8192,
+                "Max": 65536
+              },
+              "CpuManufacturers": ["amazon-web-services"],
+              "InstanceGenerations": ["current"],
+              "BurstablePerformance": "excluded",
+              "BareMetal": "excluded",
+              "AcceleratorCount": {
+                "Max": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "WorkerCompute": {
+      "Type": "AWS::ECS::CapacityProvider",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "Cluster"
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          },
+          {
+            "Key": "workload",
+            "Value": "WorkerCompute"
+          }
+        ],
+        "ManagedInstancesProvider": {
+          "InfrastructureRoleArn": {
+            "Fn::GetAtt": ["ManagedInfrastructureRole", "Arn"]
+          },
+          "PropagateTags": "CAPACITY_PROVIDER",
+          "AutoRepairConfiguration": {
+            "ActionsStatus": "ENABLED"
+          },
+          "InfrastructureOptimization": {
+            "ScaleInAfter": 300
+          },
+          "InstanceLaunchTemplate": {
+            "CapacityOptionType": "ON_DEMAND",
+            "Ec2InstanceProfileArn": {
+              "Fn::GetAtt": ["ManagedInstanceProfile", "Arn"]
+            },
+            "Monitoring": "DETAILED",
+            "InstanceMetadataTagsPropagation": false,
+            "NetworkConfiguration": {
+              "Subnets": {
+                "Ref": "PrivateSubnets"
+              },
+              "SecurityGroups": [
+                {
+                  "Ref": "ManagedHostSecurityGroup"
+                }
+              ]
+            },
+            "StorageConfiguration": {
+              "StorageSizeGiB": 100
+            },
+            "LocalStorageConfiguration": {
+              "UseLocalStorage": false
+            },
+            "InstanceRequirements": {
+              "VCpuCount": {
+                "Min": 4,
+                "Max": 8
+              },
+              "MemoryMiB": {
+                "Min": 16384,
+                "Max": 65536
+              },
+              "CpuManufacturers": ["amazon-web-services"],
+              "InstanceGenerations": ["current"],
+              "BurstablePerformance": "excluded",
+              "BareMetal": "excluded",
+              "AcceleratorCount": {
+                "Max": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "AdminCompute": {
+      "Type": "AWS::ECS::CapacityProvider",
+      "Properties": {
+        "ClusterName": {
+          "Ref": "Cluster"
+        },
+        "Tags": [
+          {
+            "Key": "application",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          },
+          {
+            "Key": "workload",
+            "Value": "AdminCompute"
+          }
+        ],
+        "ManagedInstancesProvider": {
+          "InfrastructureRoleArn": {
+            "Fn::GetAtt": ["ManagedInfrastructureRole", "Arn"]
+          },
+          "PropagateTags": "CAPACITY_PROVIDER",
+          "AutoRepairConfiguration": {
+            "ActionsStatus": "ENABLED"
+          },
+          "InfrastructureOptimization": {
+            "ScaleInAfter": 300
+          },
+          "InstanceLaunchTemplate": {
+            "CapacityOptionType": "ON_DEMAND",
+            "Ec2InstanceProfileArn": {
+              "Fn::GetAtt": ["ManagedInstanceProfile", "Arn"]
+            },
+            "Monitoring": "DETAILED",
+            "InstanceMetadataTagsPropagation": false,
+            "NetworkConfiguration": {
+              "Subnets": {
+                "Ref": "PrivateSubnets"
+              },
+              "SecurityGroups": [
+                {
+                  "Ref": "ManagedHostSecurityGroup"
+                }
+              ]
+            },
+            "StorageConfiguration": {
+              "StorageSizeGiB": 100
+            },
+            "LocalStorageConfiguration": {
+              "UseLocalStorage": false
+            },
+            "InstanceRequirements": {
+              "VCpuCount": {
+                "Min": 2,
+                "Max": 8
+              },
+              "MemoryMiB": {
+                "Min": 8192,
+                "Max": 65536
+              },
+              "CpuManufacturers": ["amazon-web-services"],
+              "InstanceGenerations": ["current"],
+              "BurstablePerformance": "excluded",
+              "BareMetal": "excluded",
+              "AcceleratorCount": {
+                "Max": 0
+              }
+            }
+          }
+        }
+      }
+    },
+    "WorkerMissingAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "WorkerAlive: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "WorkerAlive",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Count",
+        "Period": 60,
+        "EvaluationPeriods": 5,
+        "DatapointsToAlarm": 5,
+        "Threshold": 1,
+        "ComparisonOperator": "LessThanThreshold",
+        "TreatMissingData": "breaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "FailedJobsAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "FailedJobs: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "FailedJobs",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Count",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "FinanceIssuesAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "OpenFinanceIssues: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "OpenFinanceIssues",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Count",
+        "Period": 60,
+        "EvaluationPeriods": 1,
+        "DatapointsToAlarm": 1,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "QueueLagAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "QueueLagSeconds: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "QueueLagSeconds",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Seconds",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "DatapointsToAlarm": 2,
+        "Threshold": 120,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "ScannerUnavailableAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "ScannerUnavailable: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "ScannerUnavailable",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Count",
+        "Period": 60,
+        "EvaluationPeriods": 2,
+        "DatapointsToAlarm": 2,
+        "Threshold": 1,
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "TreatMissingData": "breaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "MailBacklogAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Properties": {
+        "AlarmDescription": "SMTPBacklog: investigate worker/provider state using the deployment runbook; never retry money operations blindly.",
+        "Namespace": "MyFans",
+        "MetricName": "SMTPBacklog",
+        "Dimensions": [
+          {
+            "Name": "Deployment",
+            "Value": {
+              "Ref": "DeploymentName"
+            }
+          }
+        ],
+        "Statistic": "Maximum",
+        "Unit": "Count",
+        "Period": 60,
+        "EvaluationPeriods": 5,
+        "DatapointsToAlarm": 5,
+        "Threshold": 100,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ],
+        "OKActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "ActiveDbStorageAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "FreeStorageSpace",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "DatabaseIdentifier"
+            }
+          }
+        ],
+        "Threshold": 21474836480,
+        "ComparisonOperator": "LessThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Minimum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "ActiveDbMemoryAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "FreeableMemory",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "DatabaseIdentifier"
+            }
+          }
+        ],
+        "Threshold": 1073741824,
+        "ComparisonOperator": "LessThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Minimum",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    },
+    "ActiveDbCpuAlarm": {
+      "Type": "AWS::CloudWatch::Alarm",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Alert on sustained capacity or feedback processing failure."
+        }
+      },
+      "Properties": {
+        "Namespace": "AWS/RDS",
+        "MetricName": "CPUUtilization",
+        "Dimensions": [
+          {
+            "Name": "DBInstanceIdentifier",
+            "Value": {
+              "Ref": "DatabaseIdentifier"
+            }
+          }
+        ],
+        "Threshold": 80,
+        "ComparisonOperator": "GreaterThanThreshold",
+        "Period": 300,
+        "EvaluationPeriods": 2,
+        "Statistic": "Average",
+        "TreatMissingData": "notBreaching",
+        "AlarmActions": [
+          {
+            "Ref": "AlarmTopicArn"
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ClusterArn": {
+      "Value": {
+        "Ref": "Cluster"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WebService": {
+      "Value": {
+        "Ref": "WebService"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WorkerService": {
+      "Value": {
+        "Ref": "WorkerService"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "MigrationTask": {
+      "Value": {
+        "Ref": "MigrationTask"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WebTask": {
+      "Value": {
+        "Ref": "WebTask"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WorkerTask": {
+      "Value": {
+        "Ref": "WorkerTask"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "LoadBalancerArn": {
+      "Value": {
+        "Ref": "LoadBalancer"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "OriginDomainName": {
+      "Value": {
+        "Ref": "OriginDomainName"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WebLogGroup": {
+      "Value": {
+        "Ref": "WebLogs"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WorkerLogGroup": {
+      "Value": {
+        "Ref": "WorkerLogs"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "MigrationLogGroup": {
+      "Value": {
+        "Ref": "MigrationLogs"
+      },
+      "Description": "Runtime orchestration output."
+    },
+    "WebCompute": {
+      "Value": {
+        "Ref": "WebCompute"
+      }
+    },
+    "WorkerCompute": {
+      "Value": {
+        "Ref": "WorkerCompute"
+      }
+    },
+    "AdminCompute": {
+      "Value": {
+        "Ref": "AdminCompute"
+      }
+    }
+  },
+  "Conditions": {
+    "PinnedMfaVersion": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "MfaKeyVersion"
+            },
+            ""
+          ]
+        }
+      ]
+    }
+  }
+}

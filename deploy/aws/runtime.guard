@@ -1,0 +1,214 @@
+let databases = Resources.*[ Type == 'AWS::RDS::DBInstance' ]
+let ingress = Resources.*[ Type == 'AWS::EC2::SecurityGroupIngress' ]
+let tasks = Resources.*[ Type == 'AWS::ECS::TaskDefinition' ]
+let services = Resources.*[ Type == 'AWS::ECS::Service' ]
+let secrets = Resources.*[ Type == 'AWS::SecretsManager::Secret' ]
+let keys = Resources.*[ Type == 'AWS::KMS::Key' Properties.KeyUsage !exists ]
+let logs = Resources.*[ Type == 'AWS::Logs::LogGroup' ]
+let repositories = Resources.*[ Type == 'AWS::ECR::Repository' ]
+
+rule exact_github_release_subject when Resources.GitHubReleaseRole exists {
+  Resources.GitHubReleaseRole.Properties {
+    AssumeRolePolicyDocument.Statement[0].Condition.StringEquals {
+      "token.actions.githubusercontent.com:aud" == 'sts.amazonaws.com'
+      "token.actions.githubusercontent.com:sub"."Fn::Sub" == 'repo:${GitHubOwner}/${GitHubRepository}:environment:${GitHubEnvironment}'
+    }
+    Policies[0].PolicyDocument.Statement[1].Resource[*]."Fn::Sub" != '*'
+  }
+}
+
+rule privacy_journal_export_no_read when Resources.PrivacyJournalExportRole exists {
+  Resources.PrivacyJournalExportRole.Properties.Policies[0].PolicyDocument.Statement[0] {
+    Action == 's3:PutObject'
+    Resource."Fn::Sub" == 'arn:${AWS::Partition}:s3:::${RecoveryBucketName}/privacy-journals/*'
+    Condition.StringEquals."s3:if-none-match" == '*'
+  }
+}
+rule privacy_journal_replay_no_write when Resources.PrivacyJournalReplayRole exists {
+  Resources.PrivacyJournalReplayRole.Properties.Policies[0].PolicyDocument.Statement[0] {
+    Action == 's3:GetObjectVersion'
+    Resource."Fn::Sub" == 'arn:${AWS::Partition}:s3:::${PrivacyJournalBucket}/${PrivacyJournalObjectKey}'
+    Condition.StringEquals."s3:VersionId".Ref == 'PrivacyJournalVersion'
+  }
+}
+
+rule retained_immutable_images when %repositories !empty {
+  %repositories {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.ImageTagMutability == 'IMMUTABLE'
+    Properties.ImageScanningConfiguration.ScanOnPush == true
+    Properties.EmptyOnDelete == false
+  }
+}
+
+rule private_database_ha when %databases !empty {
+  %databases {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties {
+      PubliclyAccessible == false
+      MultiAZ == true
+      StorageEncrypted == true
+      DeletionProtection == true
+      ManageMasterUserPassword == true
+      MasterUserPassword !exists
+      BackupRetentionPeriod == 35
+      DeleteAutomatedBackups == false
+    }
+  }
+}
+rule scoped_ingress when %ingress !empty {
+  %ingress.Properties {
+    CidrIp !exists
+    CidrIpv6 !exists
+    SourceSecurityGroupId exists OR SourcePrefixListId exists
+  }
+}
+rule retained_secrets when %secrets !empty {
+  %secrets {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.KmsKeyId exists
+    Properties.SecretString !exists
+  }
+}
+rule retained_rotating_keys when %keys !empty {
+  %keys {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.EnableKeyRotation == true
+    Properties.PendingWindowInDays == 30
+  }
+}
+rule retained_checkpoint_signer when Resources.RecoverySigningKey exists {
+  Resources.RecoverySigningKey {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.KeyUsage == 'SIGN_VERIFY'
+    Properties.KeySpec == 'ECC_NIST_P256'
+  }
+}
+rule encrypted_retained_logs when %logs !empty {
+  %logs {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+    Properties.KmsKeyId exists
+    Properties.RetentionInDays == 90
+  }
+}
+rule hardened_application_tasks when %tasks !empty {
+  %tasks.Properties {
+    NetworkMode == 'awsvpc'
+    RequiresCompatibilities == ['MANAGED_INSTANCES']
+    RuntimePlatform.CpuArchitecture == 'ARM64'
+    ContainerDefinitions[ Name == 'app' ] {
+      User == '1000:1000'
+      ReadonlyRootFilesystem == true
+      LinuxParameters.Capabilities.Drop == ['ALL']
+      StopTimeout == 120
+      Image.Ref == 'ImageUri'
+    }
+    ContainerDefinitions[*].Privileged !exists
+  }
+}
+rule isolated_services when %services !empty {
+  %services.Properties {
+    EnableExecuteCommand == false
+    LaunchType !exists
+    CapacityProviderStrategy[*].Weight == 1
+    PlacementConstraints[*].Type == 'distinctInstance'
+    NetworkConfiguration.AwsvpcConfiguration.AssignPublicIp == 'DISABLED'
+    DeploymentConfiguration.DeploymentCircuitBreaker.Enable == true
+    DeploymentConfiguration.DeploymentCircuitBreaker.Rollback == true
+  }
+}
+rule maintained_isolated_compute when Resources.WorkerCompute exists {
+  Resources.*[ Type == 'AWS::ECS::CapacityProvider' ].Properties.ManagedInstancesProvider {
+    AutoRepairConfiguration.ActionsStatus == 'ENABLED'
+    InstanceLaunchTemplate {
+      CapacityOptionType == 'ON_DEMAND'
+      NetworkConfiguration.Subnets.Ref == 'PrivateSubnets'
+      NetworkConfiguration.SecurityGroups == [{ 'Ref': 'ManagedHostSecurityGroup' }]
+      InstanceRequirements.CpuManufacturers == ['amazon-web-services']
+      InstanceMetadataTagsPropagation == false
+      LocalStorageConfiguration.UseLocalStorage == false
+    }
+  }
+  Resources.WebService.Properties.CapacityProviderStrategy[0].CapacityProvider.Ref == 'WebCompute'
+  Resources.WorkerService.Properties.CapacityProviderStrategy[0].CapacityProvider.Ref == 'WorkerCompute'
+  Resources.ManagedHostSecurityGroup.Properties.SecurityGroupIngress !exists
+}
+rule worker_isolation when Resources.WorkerTask exists {
+  Resources.WorkerTask {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+  }
+  Resources.MigrationTask {
+    DeletionPolicy == 'Retain'
+    UpdateReplacePolicy == 'Retain'
+  }
+  Resources.WebTask.Properties.ContainerDefinitions[ Name == 'app' ].Environment[ Name == 'APP_EMBEDDED_WORKER' ].Value == 'false'
+  Resources.WorkerTask.Properties.ContainerDefinitions[ Name == 'scanner' ] {
+    User == '1000:1000'
+    ReadonlyRootFilesystem == true
+    LinuxParameters.Capabilities.Drop == ['ALL']
+    MountPoints[*].SourceVolume == 'scanner'
+  }
+}
+rule private_tls_origin when Resources.LoadBalancer exists {
+  Resources.LoadBalancer.Properties.Scheme == 'internal'
+  Resources.Listener.Properties.Protocol == 'HTTPS'
+  Resources.Listener.Properties.Port == 443
+}
+rule authenticated_mail_feedback when Resources.MailQueuePolicy exists {
+  Resources.MailQueuePolicy.Properties.PolicyDocument.Statement[0] {
+    Principal.Service == 'sns.amazonaws.com'
+    Condition.ArnEquals.'aws:SourceArn'.Ref == 'MailEvents'
+    Condition.StringEquals.'aws:SourceAccount'.Ref == 'AWS::AccountId'
+  }
+  Resources.MailSubscription.Properties.RawMessageDelivery == true
+  Resources.MailQueue.Properties.SqsManagedSseEnabled == true
+}
+rule uncached_authenticated_edge when Resources.Distribution exists {
+  Resources.Distribution.Properties.DistributionConfig {
+    DefaultCacheBehavior {
+      CachePolicyId == '4135ea2d-6df8-44a3-9df3-4b5a84be39ad'
+      OriginRequestPolicyId == 'b689b0a8-53d0-40ab-baf2-68738e2966ac'
+      ViewerProtocolPolicy == 'redirect-to-https'
+    }
+    CustomErrorResponses[*].ErrorCachingMinTTL == 0
+    Origins[*].VpcOriginConfig exists
+    WebACLId exists
+  }
+  Resources.VpcOrigin.Properties.VpcOriginEndpointConfig.OriginProtocolPolicy == 'https-only'
+}
+rule private_waf_evidence when Resources.WebAcl exists {
+  Resources.WebAcl.Properties.VisibilityConfig.SampledRequestsEnabled == false
+  Resources.WebAcl.Properties.Rules[*].VisibilityConfig.SampledRequestsEnabled == false
+  Resources.WafLogging.Properties.LoggingFilter.DefaultBehavior == 'DROP'
+  Resources.WafLogging.Properties.RedactedFields[*] !empty
+}
+rule owner_only_historical_erasure when Resources.PrivacyVersionRole exists {
+  Resources.PrivacyVersionRole.Properties.Policies[0].PolicyDocument.Statement[3] {
+    Action == 's3:DeleteObjectVersion'
+    Resource[*].'Fn::Sub' IN [
+      'arn:${AWS::Partition}:s3:::${MediaBucketName}/${MediaPrefix}/*',
+      'arn:${AWS::Partition}:s3:::${RecoveryBucketName}/${MediaPrefix}/*',
+      'arn:${AWS::Partition}:s3:::${RecoveryBucketName}/*/objects/${MediaPrefix}/*'
+    ]
+  }
+  Resources.PrivacyExecutionRole.Properties.Policies[0].PolicyDocument.Statement[3].Resource.Ref == 'OwnerSecretArn'
+}
+
+rule recovery_aware_runtime when Resources.WorkerTask exists {
+  Resources.ActiveDbCpuAlarm.Properties.Dimensions[0].Value.Ref == 'DatabaseIdentifier'
+  Resources.ActiveDbMemoryAlarm.Properties.Dimensions[0].Value.Ref == 'DatabaseIdentifier'
+  Resources.ActiveDbStorageAlarm.Properties.Dimensions[0].Value.Ref == 'DatabaseIdentifier'
+  Resources.WorkerTask.Properties.ContainerDefinitions[ Name == 'app' ].Secrets[ Name == 'CLOUD_MFA_KEY_HEX' ].ValueFrom.'Fn::If' == [
+    'PinnedMfaVersion', { 'Fn::Sub': '${MfaKeyArn}:::${MfaKeyVersion}' }, { 'Ref': 'MfaKeyArn' }
+  ]
+  Resources.WebTask.Properties.ContainerDefinitions[ Name == 'app' ].Secrets[ Name == 'CLOUD_MFA_KEY_HEX' ].ValueFrom.'Fn::If' == [
+    'PinnedMfaVersion', { 'Fn::Sub': '${MfaKeyArn}:::${MfaKeyVersion}' }, { 'Ref': 'MfaKeyArn' }
+  ]
+}

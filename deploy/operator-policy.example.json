@@ -1,0 +1,204 @@
+{
+  "operator": {
+    "legal_name": "REPLACE_WITH_LEGAL_OPERATOR",
+    "address": "REPLACE_WITH_REGISTERED_ADDRESS",
+    "support_email": "support@replace.example",
+    "privacy_email": "privacy@replace.example"
+  },
+  "retention": {
+    "erasure_delay_days": 0,
+    "backup_days": 35,
+    "security_days": 90,
+    "financial_days": 2555,
+    "policy_evidence_days": 1095,
+    "moderation_evidence_days": 365
+  },
+  "eligibility": {
+    "minimum_age": 18,
+    "countries": [
+      {
+        "code": "US",
+        "name": "United States"
+      }
+    ],
+    "registration_enabled": false
+  },
+  "policies": [
+    {
+      "kind": "terms",
+      "title": "Terms of service",
+      "version": "2026-10-08-draft-1",
+      "updated_at": "2026-10-08",
+      "sections": [
+        {
+          "heading": "About MyFans and these terms",
+          "body": "MyFans is a service for creators to publish general-interest content and for members to follow creators, subscribe, purchase access and send content-related tips. The legal operator and contact details are identified on this policy page. These terms apply to accounts, content, communications and purchases on the service together with the Privacy, Content and Refund policies. MyFans is an independent service and is not affiliated with OnlyFans. A page identified as a development sandbox uses simulated transactions and must not be used for real payments or sensitive personal information."
+        },
+        {
+          "heading": "Eligibility and account responsibility",
+          "body": "You must be at least 18, able to enter a binding agreement, and located in a country listed as supported on this page. Provide accurate information and do not misrepresent your age, identity, location or authority to act for a business. Registration includes an age and country declaration; it does not mean every member has completed document verification. Creators must complete the required identity, age, payment-provider and platform reviews before monetizing content. Keep your password, authenticator and recovery codes private. Do not sell, share or transfer an account or use another person's identity. Contact support promptly if you suspect unauthorized access."
+        },
+        {
+          "heading": "Creator responsibilities and platform fees",
+          "body": "Creators are responsible for the accuracy, legality and delivery of their offerings, the rights needed to publish their content, and their applicable tax and business obligations. Describe what a subscriber or purchaser receives accurately; do not promise personal contact, a publishing schedule or other benefits you cannot deliver. Complete and maintain the payment provider's onboarding requirements. MyFans charges a 20% platform fee on monetized transactions. Payment-provider fees, refunds, disputes and applicable taxes can also affect creator proceeds. Review the provider's statements for the actual amounts and payout status. Creator earnings and payout timing are not guaranteed. Content-related tips are voluntary, purchase no additional access and are not charitable donations."
+        },
+        {
+          "heading": "Purchases and recurring subscriptions",
+          "body": "Review the creator, offering, currency, total price and whether payment recurs before confirming checkout. Live payments are processed through hosted Stripe Checkout in US dollars; applicable tax information is shown there. A monthly subscription renews each billing month until canceled, subject to successful payment and account eligibility. A one-time content purchase is a separate charge. Confirming a recurring checkout authorizes the disclosed recurring charges. Payment confirmation and access may take time to update. If a payment result is uncertain, check your account and contact support before attempting another purchase. A browser return from checkout alone is not payment confirmation."
+        },
+        {
+          "heading": "Canceling and managing access",
+          "body": "Cancel a subscription in Settings to request that it stop renewing at the end of its current paid period. Check the displayed cancellation status and contact support if the request does not complete. Ordinary cancellation preserves access for the remainder of that paid period; refunds, disputed payments, policy enforcement or removal of content can affect access sooner. Cancellation does not itself refund past charges. One-time access lasts while the purchased content and your entitlement remain available; it is not a promise of perpetual hosting. Blocking a member does not cancel a subscription or reverse a purchase. See the Refund policy for billing problems and remedies."
+        },
+        {
+          "heading": "Your content and permitted use",
+          "body": "You retain ownership of content you submit. You grant the operator a nonexclusive license, limited to running the service, to store, process, transcode, display and deliver it to the audiences you select, and to review it for safety, complaints and legal obligations. This license includes the service providers necessary for those purposes and is not permission to sell your content for unrelated uses. On removal or erasure, ongoing use is limited to unresolved obligations, restricted evidence and copies awaiting the applicable retention process. Members receive a personal, nontransferable right to view content through the service. Do not redistribute paid content, bypass access controls, scrape private information or use another person's work without permission."
+        },
+        {
+          "heading": "Safety, enforcement and appeals",
+          "body": "Follow the Content policy in uploads, profiles, captions, comments and messages. The operator may review reported or submitted content, refuse publication, remove content, restrict access or suspend accounts to address violations, security problems, legal obligations or provider requirements. Review and verification do not endorse a creator or guarantee the accuracy or safety of an offering. Creators may appeal eligible removed posts through Settings. A creator whose profile is rejected can read any shared review message, update the profile and request another review through Creator Studio after verifying email and signing in with recent multi-factor authentication. Contact support about other enforcement decisions. Appeals are reviewed on the available evidence and do not guarantee restoration. Where appropriate, a restored post must complete the normal review and publication process again."
+        },
+        {
+          "heading": "Availability, responsibility and consumer rights",
+          "body": "The service may experience interruptions, maintenance, errors or changes. Keep your own original content and records. Creators are responsible for their statements; use your judgment before relying on advice or making purchases. The operator remains responsible for its own obligations under applicable law. Nothing in these terms excludes rights, refunds, remedies or liability that cannot lawfully be excluded, or prevents you from contacting a regulator or using lawful dispute procedures. Contact support with a clear description and relevant account or transaction reference so a problem can be investigated. These terms do not impose mandatory arbitration or a class-action waiver."
+        },
+        {
+          "heading": "Account closure and policy changes",
+          "body": "Account deactivation and personal-data erasure are separate processes described in the Privacy policy. Resolve outstanding balances, subscriptions, disputes and other obligations as required by those processes. Closing an account does not erase payment records or cancel rights and obligations that must survive closure. Current policy versions and update dates are published on this page. Material changes must be communicated, and fresh agreement obtained where required by applicable law, before they are applied. A change to a policy does not retroactively authorize a new use of previously collected personal data."
+        }
+      ]
+    },
+    {
+      "kind": "privacy",
+      "title": "Privacy policy",
+      "version": "2026-10-08-draft-1",
+      "updated_at": "2026-10-08",
+      "sections": [
+        {
+          "heading": "Who handles your information",
+          "body": "The operator identified on this page is responsible for the personal information used to run MyFans. Contact the listed privacy address with requests or questions. This notice describes the platform's processing; payment, identity and other providers also have their own notices and responsibilities. The service is intended for adults in the listed supported countries and is not intended for anyone under 18. Contact the privacy address if you believe an underage person has supplied information."
+        },
+        {
+          "heading": "Information used by the platform",
+          "body": "We process your email, display name, password hash, account and session records, declared country and age eligibility, and accepted policy versions. If you enable multi-factor authentication, we process protected authenticator information and recovery-code digests. Creator information includes profiles, prices, uploaded files, captions, publication settings and review status. Service activity includes follows, likes, saves, comments, messages, reports, appeals, notifications and support or privacy requests. Transaction information includes provider account and transaction identifiers, amounts, currency, subscription periods, payment status, refunds, disputes and reconciliation evidence. Security and infrastructure systems may process network addresses, request metadata, service events and diagnostic logs. Do not upload identity documents, card details, secrets or other unnecessary sensitive information into posts, messages or support requests."
+        },
+        {
+          "heading": "Payments and creator identity checks",
+          "body": "Stripe collects payment and connected-account onboarding details through its hosted services. MyFans does not ask you to enter full card numbers or bank credentials into its own forms. Sumsub handles the creator's identity-document, selfie and age-verification flow. The platform uses the resulting provider identifiers, verification outcomes and limited audit information; it does not retain copies of identity documents or raw dates of birth from that flow in its application database. Providers may retain their own records for their services, security and legal obligations. Their notices apply to that processing."
+        },
+        {
+          "heading": "Why information is used",
+          "body": "Information is used to authenticate accounts, deliver creator content and communications, process purchases and recurring access, reconcile payments, send service messages, review creators and content, investigate abuse and billing problems, maintain security, answer requests and meet applicable obligations. We use information relevant to each purpose and restrict operational access. The current service does not include third-party advertising trackers or sell personal information for advertising. Introducing a different use requires review and an updated notice, with consent or other authorization where required."
+        },
+        {
+          "heading": "Audiences, sharing and service providers",
+          "body": "Creator profiles and content marked public may be visible to visitors. Paid or subscriber content is restricted according to its access settings. Other members can see the information you share with them through comments, messages and other interactions. Account deactivation or blocking does not remove copies another person has already obtained. Authorized personnel may access relevant records for support, moderation, security and legal requests. We use Amazon Web Services for hosting, storage, operational logging and service email, Stripe for payments and Sumsub for creator verification. We may disclose relevant information when required by law, to protect people and the service, or in a business transfer subject to applicable privacy obligations. We do not promise that messages are end-to-end encrypted."
+        },
+        {
+          "heading": "Cookies, browser storage and external services",
+          "body": "A first-party session cookie keeps you signed in. The browser may store limited account-scoped upload progress and file-matching metadata so you can resume an upload after reselecting the original file; it does not store the uploaded file's contents for that purpose. Disabling essential storage can prevent sign-in or resuming uploads. Hosted payment and identity pages use the providers' own technologies and privacy notices. Opening an external link or externally hosted image contacts that service, which can receive ordinary connection information. Fonts used by the application are served by the platform."
+        },
+        {
+          "heading": "Security and processing locations",
+          "body": "The service uses access controls, authenticated connections, private media storage, bounded processing and operational review to protect information. No online system can guarantee absolute security. Protect your credentials and report suspected compromise through support. The initial hosting configuration uses the United States. Providers may process information in other locations under their applicable arrangements; contact the privacy address for information relevant to your use. A country appearing in the eligibility list is not a promise that all processing stays in that country."
+        },
+        {
+          "heading": "Access, correction and privacy requests",
+          "body": "Use Settings to manage available profile and security controls, export supported account records, deactivate the account or request erasure. The account export contains the records supported by that feature; approved media and provider-held documents are separate. Contact the privacy address for corrections, access to other information, a question about a decision, or a request that cannot be completed in the account. Rights, exceptions and response requirements depend on the applicable law. We verify authority proportionately and do not ask for your password, full payment credentials or recovery codes by email. Where applicable, you may use an authorized representative, challenge a refusal or contact the relevant regulator."
+        },
+        {
+          "heading": "Deactivation and erasure",
+          "body": "Deactivation disables access and hides creator posts but is not erasure. An authenticated erasure request immediately disables the account and revokes sessions, then enters a reviewed process. Save its reference before leaving the confirmation screen because sign-in will no longer be available. There is no additional fixed waiting period before processing is eligible, but approval, ongoing financial obligations, active processing and legal holds can delay it. Application erasure removes current stored content and personal message/profile data within its scope and replaces the account with a pseudonymous record. Historical storage versions, provider records, backups and retained evidence require separate handling. Contact the privacy address with your reference for follow-up."
+        },
+        {
+          "heading": "Retention schedule and its limits",
+          "body": "Account information is retained while needed to provide the account, resolve obligations and meet the purposes described here. After application erasure, eligible personal evidence enters these review periods: security audit evidence, 90 days; financial review narratives, 2,555 days; policy-acceptance and privacy-review evidence, 1,095 days; and moderation evidence and identity-provider links, 365 days. Each period runs no earlier than application erasure and also requires the record itself to be old enough. Holds, unresolved obligations and the required completion review can delay removal. These periods concern eligible personal evidence, not a promise that monetary journals, provider receipts or all logs are deleted at that time. Minimal transaction identifiers, amounts, reconciliation relationships and restricted erasure receipts remain to protect financial integrity and demonstrate completed actions, subject to applicable obligations and restricted use."
+        },
+        {
+          "heading": "Backups, providers and completed requests",
+          "body": "External erasure completion cannot be recorded until at least 35 days after application erasure and review of historical storage, backup and provider evidence. This is a minimum review window covering automated database recovery, not a promise that every backup disappears on day 35. Manual snapshots, exported records, security logs and provider-held information have separate lifecycles and must be included in that review. Backup restoration must preserve recorded erasures and holds. We retain restricted completion references and necessary pseudonymous financial records; erasure does not mean every remaining record is anonymous or that a provider's independent obligations end."
+        },
+        {
+          "heading": "Updates and contact",
+          "body": "The current version and date of this notice appear on this page. Material changes to processing must be communicated before they take effect, with any additional authorization required by applicable law. Contact the published privacy address for questions about this notice, retention, requests or the providers involved. Contact support for ordinary account and billing help."
+        }
+      ]
+    },
+    {
+      "kind": "content",
+      "title": "Content policy",
+      "version": "2026-10-08-draft-1",
+      "updated_at": "2026-10-08",
+      "sections": [
+        {
+          "heading": "Scope and creator standards",
+          "body": "MyFans supports lawful general-interest creator content, including art, education, fitness, food, lifestyle and travel. This policy applies to every upload, profile, caption, comment, message, link and offering. Describe content and prices honestly, respect other people and publish only material you are entitled to share. Access restrictions and private messages do not create exceptions to these rules."
+        },
+        {
+          "heading": "Adult content and protection of minors",
+          "body": "Explicit sexual content, pornography, sexual services and content created primarily for sexual gratification are prohibited, including synthetic or AI-generated versions. Never publish sexual material involving minors, grooming, exploitation, nonconsensual intimate imagery or threats to distribute intimate material. Do not use the service to contact minors for sexual purposes, evade age requirements or trade another person's intimate information. Report suspected exploitation through the reporting controls or support; do not download, repost or send copies of suspected illegal sexual material."
+        },
+        {
+          "heading": "Violence, harassment and privacy",
+          "body": "Do not threaten people, promote violent wrongdoing, glorify exploitation, target people with hateful abuse, stalk, extort or repeatedly harass them. Do not publish private addresses, credentials, financial information or other sensitive personal data without a lawful basis and permission where required. Do not impersonate another person or create deceptive synthetic depictions of them. Ordinary disagreement or criticism does not justify threats or abuse."
+        },
+        {
+          "heading": "Fraud and prohibited transactions",
+          "body": "Do not run scams, create misleading offers or engagement, launder funds, evade sanctions or solicit payment for unlawful products or services. The service does not support gambling, investment schemes, peer-to-peer money transfers or regulated goods sales. Tips must relate to a creator's lawful content and must not disguise another transaction. Do not request passwords, recovery codes, full card details or identity documents through platform messages. Payment-provider restrictions also apply to monetized offerings."
+        },
+        {
+          "heading": "Rights, permissions and disclosures",
+          "body": "Publish only content you created or have permission to distribute to the selected audience, including any music, images, recordings and recognizable people. Respect copyright, trademarks, privacy and publicity rights. Clearly disclose paid endorsements or material commercial relationships where applicable, and label synthetic content when omitting that fact would mislead people. Do not make deceptive health, financial or other claims or present regulated professional services as approved by the platform. Creators remain responsible for rights and disclosures even when content passes review."
+        },
+        {
+          "heading": "Platform and upload safety",
+          "body": "Do not upload malware, malicious files or material intended to disrupt the service. Do not bypass content review, payment, account or media-access controls; scrape private data; spam members; or reuse blocked accounts to evade enforcement. Submit accurate captions for videos and avoid misleading previews. Scanning and review reduce risk but do not certify a file or guarantee that content has no errors."
+        },
+        {
+          "heading": "Reports and rights complaints",
+          "body": "Use the available report controls or the support contact to identify a concern. Include the relevant account or content link, a clear explanation and only the evidence necessary to understand it. For a rights complaint, identify the work or right, the specific material at issue, your authority to act and a way to contact you; additional formal requirements may apply under the relevant law. Do not submit knowingly false or abusive complaints. Use emergency services for an immediate threat; platform support is not an emergency service."
+        },
+        {
+          "heading": "Review, enforcement and appeals",
+          "body": "The operator may hold material for review, refuse publication, remove content, restrict activity or suspend an account based on the circumstances. Payment or identity providers may independently restrict their services. Relevant evidence may be retained under the Privacy policy or legal hold. Creators can appeal eligible removed posts in Settings. Rejected creator profiles can be updated and resubmitted in Creator Studio with a description of the changes. Contact support about other decisions. An accepted appeal does not automatically republish a post or restore a payment entitlement; the applicable safety, publication and payment checks still apply. Financial remedies are handled under the Refund policy."
+        }
+      ]
+    },
+    {
+      "kind": "refunds",
+      "title": "Refund policy",
+      "version": "2026-10-08-draft-1",
+      "updated_at": "2026-10-08",
+      "sections": [
+        {
+          "heading": "Scope and protected rights",
+          "body": "This policy covers creator subscriptions, one-time content purchases and content-related tips made through MyFans. The checkout identifies the creator, offering and charge. Applicable consumer rights take precedence; this policy does not make every purchase nonrefundable or limit rights that cannot be waived. Contact the operator's support address for billing help. A development sandbox processes no real money and any displayed refunds there are simulated."
+        },
+        {
+          "heading": "Subscription cancellation",
+          "body": "Cancel in Settings to stop renewal at the end of the current paid period. Verify that cancellation is recorded and contact support if the control fails or the status remains unclear. Cancel before the renewal date shown for the subscription; a charge already processed may need a separate refund review. Ordinary cancellation keeps the remaining paid access and does not automatically issue a prorated refund. Deleting a browser cookie, blocking a creator or simply not using the service is not subscription cancellation."
+        },
+        {
+          "heading": "When to request a refund",
+          "body": "Contact support promptly if a charge appears duplicated or unauthorized, access was not delivered, the offering was materially misrepresented, or a technical or moderation issue prevented delivery of what you paid for. We review the payment, delivery, applicable consumer rights and relevant creator information. A change of mind, unused access or a voluntary tip does not automatically produce a refund, but does not exclude a remedy required by law or supported by the circumstances. No short reporting deadline in this policy overrides a statutory or card-issuer right."
+        },
+        {
+          "heading": "Information and review",
+          "body": "Provide your account contact, creator or offering, charge date, amount, transaction reference if available and a brief explanation. Never send a password, recovery code, full card number or identity document in a refund request. We may request proportionate information needed to locate the charge or verify authority. Keep a record of the request. A request being reviewed is not confirmation that a refund has been approved or completed. Contact your bank or payment provider promptly about suspected fraud; contacting support first is not a condition for exercising your lawful rights."
+        },
+        {
+          "heading": "Refund processing and timing",
+          "body": "Approved refunds are processed against the relevant original payment through the payment provider. Delivery to your payment method depends on the provider and bank; the platform cannot guarantee an immediate credit or a fixed bank processing time. Some later subscription charges or cases require provider-assisted handling. The ordinary platform refund workflow issues the full remaining amount of the selected payment; partial or other remedies, where required, need separate handling. Do not retry payment solely because a refund or checkout status has not yet updated."
+        },
+        {
+          "heading": "Access, disputes and future renewals",
+          "body": "A refund or charge dispute can revoke access associated with the affected payment while the case is resolved. An applicable verified outcome may allow restoration, subject to the remaining account, content and payment conditions. A refund is separate from stopping future subscription renewals; use the cancellation control and check its status. Disputes are handled through the payment provider or card issuer, and the platform does not decide the issuer's case. Keep your payment and support records for follow-up."
+        },
+        {
+          "heading": "Creator funds and unavailable content",
+          "body": "Refunds, disputes, fees and provider adjustments can reduce creator proceeds or create obligations on the connected account. Provider payout schedules and restrictions still apply. Content can become unavailable because of removal, account changes or service problems; where this materially affects a paid offering, contact support for review of access or an appropriate remedy. Paying for content does not authorize redistribution or override the Content policy."
+        }
+      ]
+    }
+  ]
+}

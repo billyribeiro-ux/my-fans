@@ -1,0 +1,338 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Owner-only historical media erasure; application roles cannot delete retained S3 versions.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "arch": "Three staged stacks: foundation, runtime with service counts initially zero, private edge. Account us-east-1 required.",
+      "must": [
+        "Migrate and verify before increasing service counts.",
+        "Preserve all encryption keys and secrets with data."
+      ],
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Deployment and recovery contracts."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String"
+    },
+    "DataKeyArn": {
+      "Type": "String"
+    },
+    "ImageRepositoryArn": {
+      "Type": "String"
+    },
+    "OwnerSecretArn": {
+      "Type": "String"
+    },
+    "MediaBucketName": {
+      "Type": "String"
+    },
+    "RecoveryBucketName": {
+      "Type": "String"
+    },
+    "MediaPrefix": {
+      "Type": "String"
+    },
+    "RecoveryKeyArn": {
+      "Type": "String"
+    },
+    "MaintenanceName": {
+      "Type": "String",
+      "Default": "privacy-erasure",
+      "AllowedPattern": "^[a-z][a-z0-9/-]{1,63}$"
+    }
+  },
+  "Resources": {
+    "PrivacyLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Historical erasure evidence without secrets; distinct from live service logs."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/${MaintenanceName}"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "PrivacyExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Owner erasure injection excludes runtime passwords, MFA keys and provider secrets."
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ErasureOwnerStartup",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                  "Resource": {
+                    "Ref": "ImageRepositoryArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": {
+                    "Fn::GetAtt": ["PrivacyLogs", "Arn"]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": {
+                    "Ref": "OwnerSecretArn"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "DataKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PrivacyVersionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "SelectedMediaVersionsOnly",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucketVersions",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${MediaBucketName}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "s3:prefix": {
+                        "Fn::Sub": "${MediaPrefix}/"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:ListBucketVersions",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${RecoveryBucketName}"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:GetObjectVersion",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${MediaBucketName}/${MediaPrefix}/*"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:DeleteObjectVersion",
+                  "Resource": [
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${MediaBucketName}/${MediaPrefix}/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${RecoveryBucketName}/${MediaPrefix}/*"
+                    },
+                    {
+                      "Fn::Sub": "arn:${AWS::Partition}:s3:::${RecoveryBucketName}/*/objects/${MediaPrefix}/*"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PrivacyJournalExportRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "WriteImmutablePrivacyJournal",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:PutObject",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${RecoveryBucketName}/privacy-journals/*"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "s3:x-amz-server-side-encryption": "aws:kms",
+                      "s3:x-amz-server-side-encryption-aws-kms-key-id": {
+                        "Ref": "RecoveryKeyArn"
+                      },
+                      "s3:if-none-match": "*"
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:GenerateDataKey",
+                  "Resource": {
+                    "Ref": "RecoveryKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    },
+                    "StringLike": {
+                      "kms:EncryptionContext:aws:s3:arn": {
+                        "Fn::Sub": "arn:${AWS::Partition}:s3:::${RecoveryBucketName}/privacy-journals/*"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["PrivacyExecutionRole", "Arn"]
+      },
+      "Description": "Execution role for owner erasure tasks."
+    },
+    "LogGroup": {
+      "Value": {
+        "Ref": "PrivacyLogs"
+      },
+      "Description": "Erasure task log destination."
+    },
+    "TaskRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["PrivacyVersionRole", "Arn"]
+      }
+    },
+    "JournalExportRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["PrivacyJournalExportRole", "Arn"]
+      }
+    }
+  }
+}

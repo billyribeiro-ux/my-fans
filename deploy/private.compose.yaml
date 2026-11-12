@@ -1,0 +1,76 @@
+# Private, single-host staging only. There is deliberately no public listener.
+services:
+  postgres:
+    image: postgres:18.6@sha256:fc973eb97c9fd04bfa1840e0f510719a584ccb3be8debfe6a4144637a9dfe8cf
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: myfans
+      POSTGRES_PASSWORD_FILE: /run/secrets/bootstrap_password
+    secrets: [bootstrap_password, owner_password, runtime_password]
+    volumes:
+      - database:/var/lib/postgresql
+      - ./init-database.sql:/docker-entrypoint-initdb.d/10-myfans.sql:ro
+    restart: unless-stopped
+    stop_grace_period: 60s
+    mem_limit: 1g
+    pids_limit: 256
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U postgres -d myfans']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: &logs
+      driver: json-file
+      options: { max-size: 10m, max-file: '3' }
+  migrate:
+    image: ${MYFANS_IMAGE:?Provide an immutable image reference}
+    entrypoint: [myfans-api]
+    command: [migrate]
+    environment:
+      DATABASE_URL_FILE: /run/secrets/owner_url
+      APP_RUN_MIGRATIONS: 'true'
+      APP_MODE: sandbox
+      MAIL_TRANSPORT: sandbox
+    secrets: [owner_url]
+    volumes: [media:/app/.local/media]
+    depends_on:
+      postgres: { condition: service_healthy }
+    init: true
+    read_only: true
+    mem_limit: 2g
+    pids_limit: 256
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=256m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logs
+  app:
+    image: ${MYFANS_IMAGE:?Provide an immutable image reference}
+    ports: ['127.0.0.1:${MYFANS_PORT:?Provide a local port}:3000']
+    environment:
+      DATABASE_URL_FILE: /run/secrets/runtime_url
+      APP_RUN_MIGRATIONS: 'false'
+      APP_MODE: sandbox
+      MAIL_TRANSPORT: sandbox
+    secrets: [runtime_url]
+    volumes: [media:/app/.local/media]
+    depends_on:
+      postgres: { condition: service_healthy }
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 150s
+    read_only: true
+    mem_limit: 2g
+    pids_limit: 256
+    tmpfs: ['/tmp:rw,noexec,nosuid,size=256m,mode=1777']
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    logging: *logs
+secrets:
+  bootstrap_password: { file: '${MYFANS_DEPLOY_ROOT:?}/secrets/bootstrap_password' }
+  owner_password: { file: '${MYFANS_DEPLOY_ROOT:?}/secrets/owner_password' }
+  runtime_password: { file: '${MYFANS_DEPLOY_ROOT:?}/secrets/runtime_password' }
+  owner_url: { file: '${MYFANS_DEPLOY_ROOT:?}/secrets/owner_url' }
+  runtime_url: { file: '${MYFANS_DEPLOY_ROOT:?}/secrets/runtime_url' }
+volumes:
+  database:
+  media:

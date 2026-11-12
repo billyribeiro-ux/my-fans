@@ -1,0 +1,404 @@
+name: Private release artifacts
+on:
+  workflow_dispatch:
+    inputs:
+      app_origin:
+        description: Exact HTTPS production origin, without trailing slash
+        required: true
+        type: string
+      verification_run_id:
+        description: Successful Verify push run for this exact default-branch commit
+        required: true
+        type: string
+      expected_repository:
+        description: Optional owner/repo identity assertion (must match this repository)
+        default: ''
+        type: string
+      aports_commit:
+        description: Alpine 3.24 source recipe commit matching the packaged APK versions
+        default: 1481f27a1fc5c0c0284cbc63cbe03a7d6cee2bc3
+        required: true
+        type: string
+      publish_ecr:
+        description: Publish the verified images to explicitly configured private ECR repositories
+        default: false
+        type: boolean
+      aws_role_arn:
+        description: Optional protected-environment OIDC publication role
+        default: ''
+        type: string
+      application_repository:
+        description: Optional existing private ECR application repository URI (no tag)
+        default: ''
+        type: string
+      scanner_repository:
+        description: Optional existing private ECR scanner repository URI (no tag)
+        default: ''
+        type: string
+      aws_region:
+        default: us-east-1
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    # No release credentials or OIDC permission are available while build recipes execute.
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    outputs:
+      artifact_id: ${{ steps.artifacts.outputs.artifact-id }}
+      app_id: ${{ steps.images.outputs.app_id }}
+      scanner_id: ${{ steps.images.outputs.scanner_id }}
+      app_config: ${{ steps.images.outputs.app_config }}
+      scanner_config: ${{ steps.images.outputs.scanner_config }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.21.0
+      - name: Validate release identity and successful exact-commit CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_ORIGIN: ${{ inputs.app_origin }}
+          VERIFY_RUN: ${{ inputs.verification_run_id }}
+          EXPECTED_REPOSITORY: ${{ inputs.expected_repository }}
+          APORTS_COMMIT: ${{ inputs.aports_commit }}
+          PRIVATE_REPOSITORY: ${{ github.event.repository.private }}
+        run: |
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { writeFileSync } from 'node:fs';
+          const origin = new URL(process.env.APP_ORIGIN);
+          const domain = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/;
+          if (origin.protocol !== 'https:' || origin.origin !== process.env.APP_ORIGIN ||
+              origin.hostname.length > 253 || !domain.test(origin.hostname) ||
+              origin.port || origin.username || origin.password)
+            throw new Error('Supply an exact HTTPS application domain origin.');
+          if (process.env.PRIVATE_REPOSITORY !== 'true')
+            throw new Error('This workflow retains private artifacts only. Use a private repository with GitHub Enterprise Cloud attestations.');
+          if (process.env.EXPECTED_REPOSITORY && process.env.EXPECTED_REPOSITORY !== process.env.GITHUB_REPOSITORY)
+            throw new Error('Repository identity does not match.');
+          if (!/^[1-9][0-9]{0,18}$/.test(process.env.VERIFY_RUN) || !/^[a-f0-9]{40}$/.test(process.env.APORTS_COMMIT))
+            throw new Error('Invalid CI run ID or Alpine source commit.');
+          const run = JSON.parse(execFileSync('gh', ['api', 'repos/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.VERIFY_RUN], { encoding: 'utf8' }));
+          if (run.head_sha !== process.env.GITHUB_SHA || run.conclusion !== 'success' ||
+              run.status !== 'completed' || run.event !== 'push' ||
+              run.head_branch !== process.env.GITHUB_REF_NAME ||
+              run.path.split('@')[0] !== '.github/workflows/ci.yml' ||
+              run.head_repository.full_name !== process.env.GITHUB_REPOSITORY)
+            throw new Error('Release requires a successful Verify push run for this exact repository and commit.');
+          writeFileSync(process.env.RUNNER_TEMP + '/verified-ci.json', JSON.stringify({ id: run.id, head_sha: run.head_sha, html_url: run.html_url, conclusion: run.conclusion }, null, 2));
+          JS
+      - name: Install pinned source audit tools
+        run: |
+          npm install --global pnpm@12.10.1
+          rustup toolchain install 1.99.0 --profile minimal
+          cargo +1.99.0 install cargo-audit --version 0.22.2 --locked
+          pnpm install --frozen-lockfile
+          pnpm audit
+          cargo audit
+          cargo audit --file deploy/aws/scanner.Cargo.lock
+          pnpm check
+          pnpm test
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build same-config Docker and OCI artifacts
+        id: images
+        env:
+          APP_ORIGIN: ${{ inputs.app_origin }}
+        run: |
+          mkdir -p .local/release
+          task_epoch=$(git log -1 --format=%ct)
+          docker buildx build --platform linux/arm64 --build-arg "APP_ORIGIN=$APP_ORIGIN" --build-arg "SOURCE_DATE_EPOCH=$task_epoch" --label "org.opencontainers.image.revision=$GITHUB_SHA" --provenance=false --load --tag myfans:release .
+          docker buildx build --platform linux/arm64 --build-arg "APP_ORIGIN=$APP_ORIGIN" --build-arg "SOURCE_DATE_EPOCH=$task_epoch" --label "org.opencontainers.image.revision=$GITHUB_SHA" --provenance=mode=max --output type=oci,dest=.local/release/application.oci.tar --metadata-file .local/release/application.build.json .
+          docker buildx build --platform linux/arm64 --file deploy/aws/scanner.Dockerfile --build-arg "SOURCE_DATE_EPOCH=$task_epoch" --label "org.opencontainers.image.revision=$GITHUB_SHA" --provenance=false --load --tag myfans-scanner:release .
+          docker buildx build --platform linux/arm64 --file deploy/aws/scanner.Dockerfile --build-arg "SOURCE_DATE_EPOCH=$task_epoch" --label "org.opencontainers.image.revision=$GITHUB_SHA" --provenance=mode=max --output type=oci,dest=.local/release/scanner.oci.tar --metadata-file .local/release/scanner.build.json .
+          task_app=$(docker image inspect myfans:release --format '{{.Id}}')
+          task_scanner=$(docker image inspect myfans-scanner:release --format '{{.Id}}')
+          # Docker's containerd image store may return an index digest for .Id.
+          # Compare configuration bytes rather than confusing image/index/config identities.
+          docker image save --output .local/release/application.docker.tar "$task_app"
+          docker image save --output .local/release/scanner.docker.tar "$task_scanner"
+          config_digest() {
+            task_config_path=$(tar -xOf "$1" manifest.json | jq -er 'if length == 1 then .[0].Config else error("Expected one runtime image") end')
+            tar -xOf "$1" -- "$task_config_path" | sha256sum | awk '{print "sha256:" $1}'
+          }
+          task_app_config=$(config_digest .local/release/application.docker.tar)
+          task_scanner_config=$(config_digest .local/release/scanner.docker.tar)
+          test "$task_app_config" = "$(jq -r '."containerimage.config.digest"' .local/release/application.build.json)"
+          test "$task_scanner_config" = "$(jq -r '."containerimage.config.digest"' .local/release/scanner.build.json)"
+          test "$(docker image inspect myfans:release --format '{{index .Config.Labels "io.myfans.web-origin"}}')" = "$APP_ORIGIN"
+          printf '%s\n' "app_id=$task_app" "scanner_id=$task_scanner" "app_config=$task_app_config" "scanner_config=$task_scanner_config" >> "$GITHUB_OUTPUT"
+          docker buildx prune --force
+      - name: Generate runtime SPDX inventories and enforce vulnerability gates
+        env:
+          APP_ID: ${{ steps.images.outputs.app_id }}
+          SCANNER_ID: ${{ steps.images.outputs.scanner_id }}
+        run: |
+          node scripts/package-private.mjs "$APP_ID" .local/release/application-package
+          cp .local/release/application-package/runtime.spdx.json .local/release/application.spdx.json
+          cp .local/release/application-package/runtime-vulnerabilities.json .local/release/application.vulnerabilities.json
+          cp .local/release/application-package/source.tar.gz .local/release/source.tar.gz
+          cp .local/release/application-package/manifest.json .local/release/local-package-manifest.json
+          task_release="$PWD/.local/release"
+          mkdir -p .local/scanner-inventory .local/image-scan-cache
+          docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=256m,mode=1777 --network none -e DOCKER_SCOUT_OFFLINE=true -e DOCKER_SCOUT_CACHE_DIR=/scratch/scout -e XDG_CACHE_HOME=/scratch/cache -e TMPDIR=/scratch -v "$PWD/.local/scanner-inventory:/scratch" -v "$task_release:/package:ro" docker/scout-cli:1.25.0@sha256:d385046155c692ff5f4752fc32d612202a9211ae2c7904ae52bb65f9e1dc620a sbom --format spdx archive:///package/scanner.docker.tar > .local/release/scanner.spdx.json
+          docker run --rm --read-only --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges --tmpfs /tmp:rw,noexec,nosuid,size=256m,mode=1777 -e GRYPE_DB_CACHE_DIR=/cache -e GRYPE_CHECK_FOR_APP_UPDATE=false -v "$PWD/.local/image-scan-cache:/cache" -v "$task_release:/package:ro" anchore/grype:v0.120.1@sha256:e4a44ef45d285b829ce6efe2642980329661bd2d18eab5fc539138d4adaebbbe sbom:/package/scanner.spdx.json --distro alpine:3.24 --output json > .local/release/scanner.vulnerabilities.json
+          jq -e '[.matches[] | select(.vulnerability.severity == "High" or .vulnerability.severity == "Critical")] | length == 0' .local/release/scanner.vulnerabilities.json
+      - name: Capture checksummed corresponding source, patches, notices, and lockfile dependencies
+        env:
+          APORTS_COMMIT: ${{ inputs.aports_commit }}
+        run: |
+          mkdir -p .local/corresponding/upstream .local/corresponding/apk
+          curl --fail --location --proto '=https' --tlsv1.2 https://ffmpeg.org/releases/ffmpeg-9.0.2.tar.xz -o .local/corresponding/upstream/ffmpeg-9.0.2.tar.xz
+          echo '8c3850283eb25fa026482078a04051e0be17347b09ef81a0849bec15a96e002e  .local/corresponding/upstream/ffmpeg-9.0.2.tar.xz' | sha256sum --check
+          curl --fail --location --proto '=https' --tlsv1.2 https://nodejs.org/dist/v24.21.0/node-v24.21.0.tar.xz -o .local/corresponding/upstream/node-v24.21.0.tar.xz
+          echo 'a6f54defb6fd7c84f41dba13d61e78e9b4e0961712cf61f29715c05f5ced94fc  .local/corresponding/upstream/node-v24.21.0.tar.xz' | sha256sum --check
+          curl --fail --location --proto '=https' --tlsv1.2 https://github.com/Cisco-Talos/clamav/releases/download/clamav-1.5.4/clamav-1.5.4.tar.gz -o .local/corresponding/upstream/clamav-1.5.4.tar.gz
+          echo '1af1117a228f1b5bc7fa91a0dabc37848a99e7d25188e9be8043332ce721dfd3  .local/corresponding/upstream/clamav-1.5.4.tar.gz' | sha256sum --check
+          git clone --filter=blob:none --no-checkout https://github.com/alpinelinux/aports.git .local/corresponding/aports
+          git -C .local/corresponding/aports checkout --detach "$APORTS_COMMIT"
+          test "$(git -C .local/corresponding/aports rev-parse HEAD)" = "$APORTS_COMMIT"
+          for task_image in myfans:release myfans-scanner:release; do
+            task_name=application
+            if test "$task_image" = myfans-scanner:release; then task_name=scanner; fi
+            docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges --entrypoint /bin/cat "$task_image" /lib/apk/db/installed > ".local/corresponding/apk/$task_name.installed"
+          done
+          # The pinned upstream recipes execute without checkout credentials or OIDC.
+          # abuild fetch verifies the existing recipe checksums; checksum regeneration is forbidden.
+          docker build --tag myfans-source-collector:release - <<'DOCKER'
+          FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+          RUN apk add --no-cache abuild git build-base
+          DOCKER
+          # Match the checkout owner: a root process without DAC capabilities cannot
+          # write the host-owned recipe/source directories. No privileged bypass is needed.
+          docker run --rm -i --user "$(id -u):$(id -g)" --cap-drop ALL --security-opt no-new-privileges -e ABUILD_USERDIR=/tmp/myfans-abuild -v "$PWD/.local/corresponding:/sources" myfans-source-collector:release sh -eu <<'SH'
+          mkdir -p /sources/distfiles
+          export SRCDEST=/sources/distfiles
+          awk 'BEGIN { RS=""; FS="\n" } { origin=""; version=""; package=""; for(i=1;i<=NF;i++) { if($i ~ /^o:/) origin=substr($i,3); if($i ~ /^V:/) version=substr($i,3); if($i ~ /^P:/) package=substr($i,3) } if(origin && version && package) print origin, package, version }' /sources/apk/*.installed | sort -u > /sources/apk/origins.txt
+          test -s /sources/apk/origins.txt
+          while read -r task_origin task_package task_version; do
+            task_recipe=
+            for task_repo in main community; do
+              if test -f "/sources/aports/$task_repo/$task_origin/APKBUILD"; then task_recipe="/sources/aports/$task_repo/$task_origin"; break; fi
+            done
+            test -n "$task_recipe"
+            (
+              cd "$task_recipe" || exit 1
+              # abuild evaluates recipes with the official architecture/helpers.
+              task_packages=$(abuild -F listpkg)
+              printf '%s\n' "$task_packages" | grep -Fx "$task_package-$task_version.apk"
+              abuild -F fetch verify
+            )
+          done < /sources/apk/origins.txt
+          test -n "$(find /sources/distfiles -type f -print -quit)"
+          SH
+          cargo +1.99.0 vendor --locked --versioned-dirs .local/corresponding/application-cargo > .local/corresponding/application-vendor-config.toml
+          mkdir -p .local/scanner-source
+          tar -xzf .local/corresponding/upstream/clamav-1.5.4.tar.gz -C .local/scanner-source --strip-components=1
+          cp deploy/aws/scanner.Cargo.lock .local/scanner-source/Cargo.lock
+          rm -rf .local/scanner-source/.cargo/vendor .local/scanner-source/.cargo/config.toml
+          cargo +1.99.0 vendor --manifest-path .local/scanner-source/Cargo.toml --locked --versioned-dirs .local/corresponding/scanner-cargo > .local/corresponding/scanner-vendor-config.toml
+          pnpm --filter @myfans/web licenses list --json > .local/release/npm-licenses.json
+          tar -czf .local/release/npm-sources.tar.gz node_modules/.pnpm
+          cp THIRD_PARTY_NOTICES.md Dockerfile .local/corresponding/
+          cp scripts/install-ffmpeg.sh deploy/aws/scanner.Dockerfile deploy/aws/scanner.Cargo.lock .local/corresponding/
+          # Preserve package copyright/license declarations and upstream COPYING files,
+          # rather than treating a download URL or SPDX inventory as corresponding source.
+          git -C .local/corresponding/aports archive --format=tar.gz --output=../aports-recipes.tar.gz HEAD
+          tar -czf .local/release/corresponding-source.tar.gz --exclude=aports/.git --exclude=aports -C .local/corresponding .
+      - name: Assemble release evidence and content digests
+        env:
+          APP_ID: ${{ steps.images.outputs.app_id }}
+          SCANNER_ID: ${{ steps.images.outputs.scanner_id }}
+          APP_CONFIG: ${{ steps.images.outputs.app_config }}
+          SCANNER_CONFIG: ${{ steps.images.outputs.scanner_config }}
+          APP_ORIGIN: ${{ inputs.app_origin }}
+          APORTS_COMMIT: ${{ inputs.aports_commit }}
+        run: |
+          cp "$RUNNER_TEMP/verified-ci.json" .local/release/verified-ci.json
+          node --input-type=module <<'JS'
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const release = {
+            version: 1, source_commit: process.env.GITHUB_SHA,
+            repository: process.env.GITHUB_REPOSITORY,
+            workflow_run: process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID,
+            app_origin: process.env.APP_ORIGIN, architecture: 'linux/arm64',
+            application_image_reference: process.env.APP_ID, scanner_image_reference: process.env.SCANNER_ID,
+            application_config_digest: process.env.APP_CONFIG, scanner_config_digest: process.env.SCANNER_CONFIG,
+            aports_commit: process.env.APORTS_COMMIT,
+            verification: JSON.parse(readFileSync('.local/release/verified-ci.json', 'utf8')),
+            high_critical_gate: 'passed for both runtime inventories',
+            distribution: 'private artifacts only; no production activation, public release, or automatic legal acceptance',
+          };
+          writeFileSync('.local/release/release.json', JSON.stringify(release, null, 2) + '\n');
+          JS
+          cd .local/release || exit 1
+          sha256sum application.oci.tar scanner.oci.tar source.tar.gz corresponding-source.tar.gz npm-sources.tar.gz application.spdx.json scanner.spdx.json application.vulnerabilities.json scanner.vulnerabilities.json application.build.json scanner.build.json local-package-manifest.json npm-licenses.json verified-ci.json release.json > SHA256SUMS
+      - name: Retain only explicit private release artifacts
+        id: artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-unsigned-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            .local/release/*.oci.tar
+            .local/release/*.tar.gz
+            .local/release/*.json
+            .local/release/SHA256SUMS
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  attest:
+    needs: build
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    outputs:
+      artifact_id: ${{ steps.signed.outputs.artifact-id }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.build.outputs.artifact_id }}
+          path: release
+          merge-multiple: true
+      - name: Check all subjects before attesting
+        working-directory: release
+        run: sha256sum --check SHA256SUMS
+      - name: Attest build provenance for all release subjects
+        id: provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: release/SHA256SUMS
+          create-storage-record: false
+      - name: Attest application runtime SPDX inventory
+        id: app_sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/application.oci.tar
+          sbom-path: release/application.spdx.json
+          create-storage-record: false
+      - name: Attest scanner runtime SPDX inventory
+        id: scanner_sbom
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: release/scanner.oci.tar
+          sbom-path: release/scanner.spdx.json
+          create-storage-record: false
+      - name: Preserve and verify the issued Sigstore bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          APPLICATION_SBOM_BUNDLE: ${{ steps.app_sbom.outputs.bundle-path }}
+          SCANNER_SBOM_BUNDLE: ${{ steps.scanner_sbom.outputs.bundle-path }}
+        run: |
+          cp "$PROVENANCE_BUNDLE" release/provenance.sigstore.json
+          cp "$APPLICATION_SBOM_BUNDLE" release/application-sbom.sigstore.json
+          cp "$SCANNER_SBOM_BUNDLE" release/scanner-sbom.sigstore.json
+          gh attestation verify release/application.oci.tar --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-digest "$GITHUB_SHA" --bundle release/provenance.sigstore.json
+          gh attestation verify release/scanner.oci.tar --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-digest "$GITHUB_SHA" --bundle release/provenance.sigstore.json
+      - id: signed
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-attested-${{ github.sha }}-${{ github.run_attempt }}
+          path: release/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+  publish:
+    if: inputs.publish_ecr
+    needs: [build, attest]
+    environment: release
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          artifact-ids: ${{ needs.attest.outputs.artifact_id }}
+          path: release
+          merge-multiple: true
+      - name: Validate exact private registry destinations and role
+        env:
+          ROLE: ${{ inputs.aws_role_arn }}
+          REGION: ${{ inputs.aws_region }}
+          APPLICATION_REPOSITORY: ${{ inputs.application_repository }}
+          SCANNER_REPOSITORY: ${{ inputs.scanner_repository }}
+        run: |
+          node --input-type=module <<'JS'
+          const ecr = /^([0-9]{12})\.dkr\.ecr\.([a-z]{2}-[a-z]+-[1-9])\.amazonaws\.com\/([a-z0-9]+(?:[._/-][a-z0-9]+)*)$/;
+          const a = ecr.exec(process.env.APPLICATION_REPOSITORY), b = ecr.exec(process.env.SCANNER_REPOSITORY);
+          const role = /^arn:aws:iam::([0-9]{12}):role\/[A-Za-z0-9+=,.@_/-]+$/.exec(process.env.ROLE);
+          if (!a || !b || !role || a[1] !== b[1] || role[1] !== a[1] || a[2] !== b[2] ||
+              a[2] !== process.env.REGION || process.env.APPLICATION_REPOSITORY === process.env.SCANNER_REPOSITORY)
+            throw new Error('Provide exact, distinct private ECR repositories and an OIDC role in their account and region.');
+          JS
+          cd release || exit 1
+          sha256sum --check SHA256SUMS
+      - name: Verify provenance before requesting cloud credentials
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify release/application.oci.tar --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-digest "$GITHUB_SHA" --bundle release/provenance.sigstore.json
+          gh attestation verify release/scanner.oci.tar --repo "$GITHUB_REPOSITORY" --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" --source-digest "$GITHUB_SHA" --bundle release/provenance.sigstore.json
+          sudo apt-get update
+          sudo apt-get install -y skopeo
+          skopeo copy oci-archive:release/application.oci.tar docker-daemon:myfans:release
+          skopeo copy oci-archive:release/scanner.oci.tar docker-daemon:myfans-scanner:release
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+          role-session-name: release-${{ github.run_id }}
+          role-duration-seconds: 1800
+      - name: Publish immutable digest-addressed images only
+        env:
+          REGION: ${{ inputs.aws_region }}
+          APPLICATION_REPOSITORY: ${{ inputs.application_repository }}
+          SCANNER_REPOSITORY: ${{ inputs.scanner_repository }}
+          APP_CONFIG: ${{ needs.build.outputs.app_config }}
+          SCANNER_CONFIG: ${{ needs.build.outputs.scanner_config }}
+        run: |
+          task_registry=$(echo "$APPLICATION_REPOSITORY" | cut -d/ -f1)
+          aws ecr get-login-password --region "$REGION" | docker login --username AWS --password-stdin "$task_registry"
+          for task_image in myfans:release myfans-scanner:release; do
+            task_repo="$APPLICATION_REPOSITORY"
+            task_config="$APP_CONFIG"
+            if test "$task_image" = myfans-scanner:release; then task_repo="$SCANNER_REPOSITORY"; task_config="$SCANNER_CONFIG"; fi
+            task_archive="$RUNNER_TEMP/imported-image.tar"
+            docker image save --output "$task_archive" "$task_image"
+            task_config_path=$(tar -xOf "$task_archive" manifest.json | jq -er 'if length == 1 then .[0].Config else error("Expected one runtime image") end')
+            task_imported_config=$(tar -xOf "$task_archive" -- "$task_config_path" | sha256sum | awk '{print "sha256:" $1}')
+            test "$task_imported_config" = "$task_config"
+            rm "$task_archive"
+            task_name=$(echo "$task_repo" | cut -d/ -f2-)
+            test "$(aws ecr describe-repositories --region "$REGION" --repository-names "$task_name" --query 'repositories[0].imageTagMutability' --output text)" = IMMUTABLE
+            task_tag="release-$GITHUB_SHA-$GITHUB_RUN_ID"
+            docker tag "$task_image" "$task_repo:$task_tag"
+            docker push "$task_repo:$task_tag"
+            task_digest=$(aws ecr describe-images --region "$REGION" --repository-name "$task_name" --image-ids "imageTag=$task_tag" --query 'imageDetails[0].imageDigest' --output text)
+            echo "$task_digest" | grep -Eq '^sha256:[a-f0-9]{64}$'
+            aws ecr batch-get-image --region "$REGION" --repository-name "$task_name" --image-ids "imageDigest=$task_digest" --query 'images[0].imageManifest' --output text | jq -e --arg expected "$task_config" '.config.digest == $expected'
+            echo "$task_repo@$task_digest" >> "$GITHUB_STEP_SUMMARY"
+          done
+          docker logout "$task_registry"

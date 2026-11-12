@@ -1,0 +1,260 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Isolated recovery task execution permissions; no running service or public ingress is created.",
+  "Metadata": {
+    "AWSToolsMetrics": {
+      "AWSAgentToolkit": "aws-cloudformation@3"
+    },
+    "com.aws.cloudformation.Context": {
+      "arch": "Three staged stacks: foundation, runtime with service counts initially zero, private edge. Account us-east-1 required.",
+      "must": [
+        "Migrate and verify before increasing service counts.",
+        "Preserve all encryption keys and secrets with data."
+      ],
+      "ref": [
+        {
+          "at": "docs/aws-runtime.md",
+          "has": "Deployment and recovery contracts."
+        }
+      ]
+    }
+  },
+  "Parameters": {
+    "DeploymentName": {
+      "Type": "String"
+    },
+    "DataKeyArn": {
+      "Type": "String"
+    },
+    "SecretArns": {
+      "Type": "CommaDelimitedList"
+    },
+    "SecretKeyArns": {
+      "Type": "CommaDelimitedList"
+    },
+    "ImageRepositoryArn": {
+      "Type": "String"
+    },
+    "ScannerRepositoryArn": {
+      "Type": "String"
+    },
+    "RestoreName": {
+      "Type": "String",
+      "AllowedPattern": "^restore-[a-f0-9]{8}$"
+    },
+    "PrivacyJournalBucket": {
+      "Type": "String"
+    },
+    "PrivacyJournalKeyArn": {
+      "Type": "String"
+    },
+    "PrivacyJournalObjectKey": {
+      "Type": "String",
+      "AllowedPattern": "^privacy-journals/privacy-[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}/journal\\.json$"
+    },
+    "PrivacyJournalVersion": {
+      "Type": "String",
+      "MinLength": 1,
+      "MaxLength": 1024
+    }
+  },
+  "Resources": {
+    "RecoveryLogs": {
+      "Type": "AWS::Logs::LogGroup",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "Recovery evidence without secret values; distinct from live service logs."
+        }
+      },
+      "Properties": {
+        "LogGroupName": {
+          "Fn::Sub": "/myfans/${DeploymentName}/${RestoreName}"
+        },
+        "RetentionInDays": 90,
+        "KmsKeyId": {
+          "Ref": "DataKeyArn"
+        }
+      },
+      "DeletionPolicy": "Retain",
+      "UpdateReplacePolicy": "Retain"
+    },
+    "RecoveryExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Metadata": {
+        "com.aws.cloudformation.Context": {
+          "why": "A temporary execution role can inject only explicitly selected restore secrets; no live role is broadened."
+        }
+      },
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "IsolatedRestoreStartup",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "ecr:GetAuthorizationToken",
+                  "Resource": "*"
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
+                  "Resource": [
+                    {
+                      "Ref": "ImageRepositoryArn"
+                    },
+                    {
+                      "Ref": "ScannerRepositoryArn"
+                    }
+                  ]
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": ["logs:CreateLogStream", "logs:PutLogEvents"],
+                  "Resource": {
+                    "Fn::GetAtt": ["RecoveryLogs", "Arn"]
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "secretsmanager:GetSecretValue",
+                  "Resource": {
+                    "Ref": "SecretArns"
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "SecretKeyArns"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "secretsmanager.${AWS::Region}.${AWS::URLSuffix}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "PrivacyJournalReplayRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "ecs-tasks.amazonaws.com"
+              },
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId"
+                  }
+                },
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Sub": "arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:*"
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "Policies": [
+          {
+            "PolicyName": "ReadSignedPrivacyJournal",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": "s3:GetObjectVersion",
+                  "Resource": {
+                    "Fn::Sub": "arn:${AWS::Partition}:s3:::${PrivacyJournalBucket}/${PrivacyJournalObjectKey}"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "s3:VersionId": {
+                        "Ref": "PrivacyJournalVersion"
+                      }
+                    }
+                  }
+                },
+                {
+                  "Effect": "Allow",
+                  "Action": "kms:Decrypt",
+                  "Resource": {
+                    "Ref": "PrivacyJournalKeyArn"
+                  },
+                  "Condition": {
+                    "StringEquals": {
+                      "kms:ViaService": {
+                        "Fn::Sub": "s3.${AWS::Region}.${AWS::URLSuffix}"
+                      },
+                      "kms:EncryptionContext:aws:s3:arn": {
+                        "Fn::Sub": "arn:${AWS::Partition}:s3:::${PrivacyJournalBucket}/${PrivacyJournalObjectKey}"
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "ExecutionRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["RecoveryExecutionRole", "Arn"]
+      },
+      "Description": "Execution role for isolated recovery task revisions."
+    },
+    "LogGroup": {
+      "Value": {
+        "Ref": "RecoveryLogs"
+      },
+      "Description": "Restore task log destination."
+    },
+    "JournalReplayRoleArn": {
+      "Value": {
+        "Fn::GetAtt": ["PrivacyJournalReplayRole", "Arn"]
+      }
+    }
+  }
+}

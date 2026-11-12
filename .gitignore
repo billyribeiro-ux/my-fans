@@ -1,0 +1,15 @@
+node_modules/
+.pnpm-store/
+.svelte-kit/
+apps/web/build/
+target/
+.env
+.env.*
+!.env.example
+.DS_Store
+playwright-report/
+test-results/
+coverage/
+.local/
+.claude/settings.local.json
+.aws/
